@@ -1,17 +1,17 @@
+// Command console is an interactive admin tool for the Olympic service. It lets
+// you set up the base entities (countries, games, sports, disciplines,
+// athletes, events, teams, rosters) directly in Postgres, and then "realize" an
+// event — which generates fake results, medals and records and fans them out
+// across Postgres, Redis, Mongo and Neo4j (the same orchestration the HTTP API
+// uses).
 package main
 
 import (
 	"context"
-	"errors"
-	"log/slog"
-	"net"
-	"net/http"
+	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
-	"github.com/ObiaNzk/bdd-2-JOJO/cmd/server/internal/handler"
 	"github.com/ObiaNzk/bdd-2-JOJO/internal/config"
 	mongodbx "github.com/ObiaNzk/bdd-2-JOJO/internal/platform/mongodb"
 	neo4jx "github.com/ObiaNzk/bdd-2-JOJO/internal/platform/neo4j"
@@ -22,22 +22,17 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-
-	if err := run(logger); err != nil {
-		logger.Error("server exited with error", "err", err)
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "console error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
-	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
+func run() error {
+	ctx := context.Background()
 	cfg := config.Load()
 
-	bootCtx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
+	bootCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	pgPool, err := postgresx.New(bootCtx, cfg.PostgresDSN)
@@ -45,7 +40,6 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer pgPool.Close()
-	logger.Info("postgres connected")
 
 	mongoClient, err := mongodbx.New(bootCtx, cfg.MongoURI)
 	if err != nil {
@@ -56,14 +50,12 @@ func run(logger *slog.Logger) error {
 		defer c()
 		_ = mongoClient.Disconnect(shutdownCtx)
 	}()
-	logger.Info("mongodb connected")
 
 	redisClient, err := redisx.New(bootCtx, cfg.RedisAddr, cfg.RedisPassword)
 	if err != nil {
 		return err
 	}
 	defer redisClient.Close()
-	logger.Info("redis connected")
 
 	neoDriver, err := neo4jx.New(bootCtx, cfg.Neo4jURI, cfg.Neo4jUser, cfg.Neo4jPassword)
 	if err != nil {
@@ -74,7 +66,6 @@ func run(logger *slog.Logger) error {
 		defer c()
 		_ = neoDriver.Close(shutdownCtx)
 	}()
-	logger.Info("neo4j connected")
 
 	sqlRepo := repository.NewPostgresRepository(pgPool)
 	cacheRepo := repository.NewRedisRepository(redisClient)
@@ -89,47 +80,15 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	logger.Info("default data ensured", "countriesCreated", countriesCreated, "athletesCreated", athletesCreated)
+	if countriesCreated+athletesCreated > 0 {
+		fmt.Printf("datos por defecto cargados: %d países, %d deportistas\n", countriesCreated, athletesCreated)
+	}
 
 	svc := service.New(sqlRepo, cacheRepo, resultRepo, graphRepo)
 
 	if err := svc.SyncBaseEntities(bootCtx); err != nil {
 		return err
 	}
-	logger.Info("base entities mirrored to graph")
 
-	h := handler.New(svc)
-
-	srv := &http.Server{
-		Addr:              net.JoinHostPort("", cfg.AppPort),
-		Handler:           h.Router(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	serverErr := make(chan error, 1)
-	go func() {
-		logger.Info("listening", "addr", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-			return
-		}
-		serverErr <- nil
-	}()
-
-	select {
-	case <-rootCtx.Done():
-		logger.Info("shutdown signal received")
-	case err := <-serverErr:
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelShutdown()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return err
-	}
-	return nil
+	return newConsole(sqlRepo, svc).Run(ctx)
 }

@@ -7,6 +7,8 @@ services:
       POSTGRES_DB: app
     ports:
       - "5432:5432"
+    volumes:
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d app"]
       interval: 5s
@@ -69,3 +71,38 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+
+  # --- Optional web UIs (opt-in): docker compose --profile tools up -d ---
+
+  adminer:
+    image: adminer:4
+    profiles: ["tools"]
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: dracula
+    ports:
+      - "8081:8080"
+    depends_on:
+      - postgres
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    profiles: ["tools"]
+    environment:
+      ME_CONFIG_MONGODB_URL: "mongodb://mongo:27017"
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: "true"
+      ME_CONFIG_BASICAUTH: "false"
+    ports:
+      - "8082:8081"
+    depends_on:
+      - mongo
+
+  redis-commander:
+    image: ghcr.io/joeferner/redis-commander:latest
+    profiles: ["tools"]
+    environment:
+      REDIS_HOSTS: "local:redis:6379"
+    ports:
+      - "8083:8081"
+    depends_on:
+      - redis
