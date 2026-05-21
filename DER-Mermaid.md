@@ -27,12 +27,10 @@ erDiagram
     int id_juego PK
     int anio
     string ciudad
-    string tipo
   }
   PAIS {
     int id_pais PK
     string nombre
-    string codigo_iso
   }
   JUEGO_OLIM_PAIS {
     int id_jo_pais PK
@@ -50,7 +48,6 @@ erDiagram
     int id_disciplina FK
     int id_calendario FK
     string nombre
-    string genero
   }
   EQUIPO {
     int id_equipo PK
@@ -65,8 +62,6 @@ erDiagram
     int id_atleta PK
     int id_pais FK
     string nombre
-    date fecha_nac
-    string genero
   }
   RESULTADOS {
     int id_resultado PK
