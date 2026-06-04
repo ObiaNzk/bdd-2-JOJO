@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 #
-# Seeds two Olympic editions (Tokio 2020, París 2024) across the four databases
-# with three disciplines, each realized by its own builder in the service:
+# Seeds three complete Olympic editions (Tokio 2020, París 2024, Los Ángeles 2028)
+# across the four databases. Each edition has the same three disciplines, each
+# realized by its own builder in the service:
 #   - Natación 100m Libre  -> "race"           (carriles, parciales y tiempos en s)
 #   - Salto con garrocha   -> "field_attempts" (alturas e intentos O/X/- en m)
-#   - Fútbol 11            -> "tournament"      (cuadro octavos->final, goles y stats)
-# Base entities go into Postgres via SQL; then each event is "realized" through
-# the HTTP API (POST /events/{id}/realize), so the service invents the result and
-# fans medals/results/records out to Redis, Mongo and Neo4j.
+#   - Fútbol 11            -> "tournament"     (cuadro octavos->final, goles y stats)
 #
-# Idempotent: every store is flushed before seeding, so it is safe to re-run.
+# Países: el script elige una cantidad aleatoria entre 16 y 20 de una lista
+# maestra. El mínimo (16) es lo que necesita una ronda de octavos completa para
+# que ningún equipo de fútbol sea filler. Para cada evento, un subconjunto
+# aleatorio de los países entrados al juego forma los equipos (16 para fútbol;
+# 4..8 para los individuales). Para que el caso 4 (atletas en múltiples
+# disciplinas) tenga datos, en algunos países el nadador se agrega también al
+# equipo de garrocha.
+#
+# Base entities go into Postgres via SQL; cada evento es "realizado" a través
+# de la API HTTP (POST /events/{id}/realize), que invierte el resultado y
+# replica medallas/resultados/records a Redis, Mongo y Neo4j.
+#
+# Idempotente: los 4 stores se vacían antes de sembrar.
 #
 # Usage:
 #   ./scripts/seed.sh
@@ -36,89 +46,165 @@ docker compose exec -T mongo mongosh app --quiet --eval "db.event_results.drop()
 docker compose exec -T neo4j cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" \
   "MATCH (n) DETACH DELETE n" >/dev/null
 
-echo "==> Seeding base entities into Postgres"
-docker compose exec -T postgres psql -U app -d app -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+# Cantidad aleatoria de países entre 16 y 20. Los primeros tres del master
+# (USA, Francia, Japón) son sedes y siempre quedan incluidos.
+N=$((16 + RANDOM % 5))
+echo "==> Seeding ${N} países (aleatorio entre 16 y 20) en 3 ediciones"
+
+docker compose exec -T postgres psql -U app -d app -v ON_ERROR_STOP=1 -v "N=${N}" >/dev/null <<'SQL'
 TRUNCATE medals, team_athletes, teams, events,
          game_countries, athletes, disciplines, sports, olympic_games, countries
 RESTART IDENTITY CASCADE;
 
--- Countries (1..6)
-INSERT INTO countries (name) VALUES
-  ('Estados Unidos'),  -- 1
-  ('Francia'),         -- 2
-  ('Australia'),       -- 3
-  ('Suecia'),          -- 4
-  ('Japón'),           -- 5
-  ('Gran Bretaña');    -- 6
+-- Master list de 20 países; tomamos los primeros :N. Las sedes (USA, Francia,
+-- Japón) ocupan las tres primeras posiciones para que siempre estén presentes.
+WITH master(ord, name) AS (
+  VALUES
+    (1,  'Estados Unidos'),
+    (2,  'Francia'),
+    (3,  'Japón'),
+    (4,  'Australia'),
+    (5,  'Suecia'),
+    (6,  'Gran Bretaña'),
+    (7,  'Brasil'),
+    (8,  'España'),
+    (9,  'Alemania'),
+    (10, 'Italia'),
+    (11, 'Países Bajos'),
+    (12, 'Portugal'),
+    (13, 'Croacia'),
+    (14, 'Bélgica'),
+    (15, 'México'),
+    (16, 'Argentina'),
+    (17, 'Canadá'),
+    (18, 'Corea del Sur'),
+    (19, 'Marruecos'),
+    (20, 'Nigeria')
+)
+INSERT INTO countries (name)
+SELECT name FROM master WHERE ord <= :N ORDER BY ord;
 
--- Sports (1 Natación, 2 Atletismo, 3 Fútbol)
+-- 3 deportes, 1 disciplina por deporte.
 INSERT INTO sports (name) VALUES ('Natación'), ('Atletismo'), ('Fútbol');
-
--- Disciplines (1..3)
 INSERT INTO disciplines (sport_id, name) VALUES
-  (1,'100m Libre'),          -- 1 Natación
-  (2,'Salto con garrocha'),  -- 2 Atletismo
-  (3,'Fútbol 11');           -- 3 Fútbol
+  (1, '100m Libre'),
+  (2, 'Salto con garrocha'),
+  (3, 'Fútbol 11');
 
--- Olympic games (1 Tokio 2020 host JPN, 2 París 2024 host FRA)
+-- 3 juegos olímpicos; los hosts se resuelven por nombre.
 INSERT INTO olympic_games (year, city, host_country_id) VALUES
-  (2020,'Tokio',5),
-  (2024,'París',2);
+  (2020, 'Tokio',       (SELECT id FROM countries WHERE name = 'Japón')),
+  (2024, 'París',       (SELECT id FROM countries WHERE name = 'Francia')),
+  (2028, 'Los Ángeles', (SELECT id FROM countries WHERE name = 'Estados Unidos'));
 
--- Participating countries per game (game_countries 1..12)
-INSERT INTO game_countries (game_id, country_id) VALUES
-  (1,1),(1,2),(1,3),(1,4),(1,5),(1,6),   -- 1..6  Tokio
-  (2,1),(2,2),(2,3),(2,4),(2,5),(2,6);   -- 7..12 París
+-- Todos los países participan en todos los juegos.
+INSERT INTO game_countries (game_id, country_id)
+SELECT g.id, c.id
+FROM olympic_games g CROSS JOIN countries c
+ORDER BY g.id, c.id;
 
--- Events (1..5). e5 (Fútbol Tokio) queda SIN realizar para la demo de la consola.
-INSERT INTO events (game_id, discipline_id, name, event_date) VALUES
-  (2,1,'Final 100m Libre','2024-07-31'),         -- 1 París Natación
-  (2,2,'Final Salto con garrocha','2024-08-05'), -- 2 París Salto
-  (2,3,'Final Fútbol 11','2024-08-09'),          -- 3 París Fútbol
-  (1,1,'Final 100m Libre','2020-07-29'),         -- 4 Tokio Natación
-  (1,3,'Final Fútbol 11','2020-08-07');          -- 5 Tokio Fútbol (sin realizar)
+-- 9 eventos: uno por (juego, disciplina).
+INSERT INTO events (game_id, discipline_id, name, event_date)
+SELECT g.id, d.id,
+       'Final ' || d.name || ' ' || g.city,
+       make_date(g.year, 8, 1)
+FROM olympic_games g CROSS JOIN disciplines d
+ORDER BY g.id, d.id;
 
--- Individual athletes (a1..a5). Kyle Chalmers compite en 100m y en garrocha:
--- es el atleta multi-disciplina para el caso 4.
-INSERT INTO athletes (country_id, name) VALUES
-  (1,'Caeleb Dressel'),    -- 1 USA  natación
-  (2,'Maxime Grousset'),   -- 2 FRA  natación
-  (3,'Kyle Chalmers'),     -- 3 AUS  natación + garrocha
-  (4,'Armand Duplantis'),  -- 4 SWE  garrocha
-  (1,'Sam Kendricks');     -- 5 USA  garrocha
+-- Atletas: 1 nadador + 1 garrochista + 11 futbolistas por país.
+INSERT INTO athletes (country_id, name)
+SELECT c.id, 'Nadador ' || c.name FROM countries c ORDER BY c.id;
 
--- Football rosters: 11 players per nation (FRA, GBR, USA, AUS).
-INSERT INTO athletes (country_id, name) SELECT 2, 'Futbolista FRA ' || g FROM generate_series(1,11) g;
-INSERT INTO athletes (country_id, name) SELECT 6, 'Futbolista GBR ' || g FROM generate_series(1,11) g;
-INSERT INTO athletes (country_id, name) SELECT 1, 'Futbolista USA ' || g FROM generate_series(1,11) g;
-INSERT INTO athletes (country_id, name) SELECT 3, 'Futbolista AUS ' || g FROM generate_series(1,11) g;
+INSERT INTO athletes (country_id, name)
+SELECT c.id, 'Garrochista ' || c.name FROM countries c ORDER BY c.id;
 
--- Teams (t1..t17).
-INSERT INTO teams (game_country_id, event_id) VALUES
-  -- e1 100m Libre París: USA, FRA, AUS
-  (7,1),(8,1),(9,1),         -- t1,t2,t3
-  -- e2 Salto París: SWE, USA, AUS
-  (10,2),(7,2),(9,2),        -- t4,t5,t6
-  -- e3 Fútbol París: FRA, GBR, USA, AUS
-  (8,3),(12,3),(7,3),(9,3),  -- t7,t8,t9,t10
-  -- e4 100m Libre Tokio: USA, FRA, AUS
-  (1,4),(2,4),(3,4),         -- t11,t12,t13
-  -- e5 Fútbol Tokio (sin realizar): FRA, GBR, USA, AUS
-  (2,5),(6,5),(1,5),(3,5);   -- t14,t15,t16,t17
+INSERT INTO athletes (country_id, name)
+SELECT c.id, 'Futbolista ' || c.name || ' ' || g
+FROM countries c CROSS JOIN generate_series(1, 11) g
+ORDER BY c.id, g;
 
--- Individual rosters (one athlete per swimming/vault team).
-INSERT INTO team_athletes (team_id, athlete_id) VALUES
-  (1,1),(2,2),(3,3),     -- e1 100m: Dressel, Grousset, Chalmers
-  (4,4),(5,5),(6,3),     -- e2 garrocha: Duplantis, Kendricks, Chalmers (multi-disciplina)
-  (11,1),(12,2),(13,3);  -- e4 100m: Dressel, Grousset, Chalmers
+-- Equipos:
+--   * Fútbol: 16 países (ronda de 16 sin filler).
+--   * Individuales: 4..8 países random por evento (siempre >= 3).
+INSERT INTO teams (game_country_id, event_id)
+SELECT gc.id, e.id
+FROM events e
+JOIN disciplines d ON d.id = e.discipline_id
+CROSS JOIN LATERAL (
+  SELECT gc.id
+  FROM game_countries gc
+  WHERE gc.game_id = e.game_id
+  ORDER BY random()
+  LIMIT 16
+) gc
+WHERE d.name = 'Fútbol 11';
 
--- Football rosters: 11 players per team (matched by country).
+INSERT INTO teams (game_country_id, event_id)
+SELECT gc.id, e.id
+FROM events e
+JOIN disciplines d ON d.id = e.discipline_id
+CROSS JOIN LATERAL (
+  SELECT gc.id
+  FROM game_countries gc
+  WHERE gc.game_id = e.game_id
+  ORDER BY random()
+  LIMIT 4 + floor(random() * 5)::int
+) gc
+WHERE d.name <> 'Fútbol 11';
+
+-- Plantel de cada equipo (matching por prefijo del nombre del atleta).
 INSERT INTO team_athletes (team_id, athlete_id)
 SELECT t.id, a.id
 FROM teams t
-JOIN events e          ON e.id = t.event_id AND e.discipline_id = 3
+JOIN events e          ON e.id = t.event_id
+JOIN disciplines d     ON d.id = e.discipline_id AND d.name = '100m Libre'
+JOIN game_countries gc ON gc.id = t.game_country_id
+JOIN athletes a        ON a.country_id = gc.country_id AND a.name LIKE 'Nadador %';
+
+INSERT INTO team_athletes (team_id, athlete_id)
+SELECT t.id, a.id
+FROM teams t
+JOIN events e          ON e.id = t.event_id
+JOIN disciplines d     ON d.id = e.discipline_id AND d.name = 'Salto con garrocha'
+JOIN game_countries gc ON gc.id = t.game_country_id
+JOIN athletes a        ON a.country_id = gc.country_id AND a.name LIKE 'Garrochista %';
+
+INSERT INTO team_athletes (team_id, athlete_id)
+SELECT t.id, a.id
+FROM teams t
+JOIN events e          ON e.id = t.event_id
+JOIN disciplines d     ON d.id = e.discipline_id AND d.name = 'Fútbol 11'
 JOIN game_countries gc ON gc.id = t.game_country_id
 JOIN athletes a        ON a.country_id = gc.country_id AND a.name LIKE 'Futbolista %';
+
+-- Multi-disciplina (case 4): hasta 3 pares (juego, país) donde el país tiene
+-- equipo en natación y en salto. Para esos, agregamos al nadador como atleta
+-- extra del equipo de salto, así medalla en ambas disciplinas.
+WITH swim AS (
+  SELECT t.id AS team_id, gc.country_id, gc.game_id
+  FROM teams t
+  JOIN events e          ON e.id = t.event_id
+  JOIN disciplines d     ON d.id = e.discipline_id AND d.name = '100m Libre'
+  JOIN game_countries gc ON gc.id = t.game_country_id
+),
+vault AS (
+  SELECT t.id AS team_id, gc.country_id, gc.game_id
+  FROM teams t
+  JOIN events e          ON e.id = t.event_id
+  JOIN disciplines d     ON d.id = e.discipline_id AND d.name = 'Salto con garrocha'
+  JOIN game_countries gc ON gc.id = t.game_country_id
+),
+overlap AS (
+  SELECT s.country_id, v.team_id AS vault_team_id
+  FROM swim s
+  JOIN vault v ON v.game_id = s.game_id AND v.country_id = s.country_id
+  ORDER BY random()
+  LIMIT 3
+)
+INSERT INTO team_athletes (team_id, athlete_id)
+SELECT o.vault_team_id, a.id
+FROM overlap o
+JOIN athletes a ON a.country_id = o.country_id AND a.name LIKE 'Nadador %';
 SQL
 
 api_post() {
@@ -131,10 +217,9 @@ api_post() {
   esac
 }
 
-# Realize every medal event (e5 stays unrealized for the console demo). Each call
-# runs the discipline-specific builder that invents the result and fans it out.
-echo "==> Realizing events via the API (POST /events/{id}/realize)"
-for ev in 1 2 3 4; do
+# Realizamos los 9 eventos (3 por edición).
+echo "==> Realizing 9 events via the API (POST /events/{id}/realize)"
+for ev in 1 2 3 4 5 6 7 8 9; do
   api_post "/events/${ev}/realize"
 done
 echo
@@ -145,11 +230,12 @@ docker compose exec -T neo4j cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" --form
 docker compose exec -T neo4j cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" --format plain \
   "MATCH ()-[r]->() RETURN type(r) AS relationship, count(*) AS count ORDER BY type(r)"
 
-echo "==> Done. 3 disciplinas (100m Libre, Salto con garrocha, Fútbol 11) en 2 ediciones."
-echo "    Demo consola: make console -> opción 10 -> realizar evento 5 (Final Fútbol 11 Tokio, sin realizar)."
+echo "==> Done. 3 ediciones (Tokio 2020, París 2024, Los Ángeles 2028) x 3 disciplinas."
 echo "    API:"
 echo "      curl -s ${APP_URL}/games/latest/medals | jq"
 echo "      curl -s ${APP_URL}/athletes/multi-discipline?min=2 | jq"
 echo "      curl -s ${APP_URL}/records | jq"
-echo "      curl -s '${APP_URL}/event-results?discipline=2' | jq   # salto con garrocha"
-echo "      curl -s '${APP_URL}/event-results?discipline=3' | jq   # fútbol (cuadro completo)"
+echo "      curl -s ${APP_URL}/top-athletes?min=2 | jq                        # cross-games"
+echo "      curl -s ${APP_URL}/countries/1/medals-by-discipline | jq          # cross-games"
+echo "      curl -s '${APP_URL}/event-results?discipline=2' | jq              # salto con garrocha"
+echo "      curl -s '${APP_URL}/event-results?discipline=3' | jq              # fútbol (cuadro completo)"

@@ -15,51 +15,23 @@ import (
 // event tells the same tournament story.
 const footballBracketSize = 16
 
-// fillerCountries pad the bracket when fewer than 16 real teams are entered.
-// They are pure narrative: no team id and no roster, so they never receive
-// medals (those go to the real teams that reach the podium).
-var fillerCountries = []string{
-	"Brasil", "España", "Alemania", "Italia", "Países Bajos", "Portugal",
-	"Croacia", "Bélgica", "México", "Nigeria", "Corea del Sur", "Marruecos",
-	"Senegal", "Uruguay", "Colombia", "Egipto",
-}
-
-// footballCompetitor is one team in the bracket. Real teams carry their
-// TeamGraph (so goals reference real athletes and medals fan out to the other
-// stores); filler teams only have a country name.
+// footballCompetitor is one team in the bracket. It always carries a TeamGraph
+// from a real entered team — when fewer than 16 teams are registered, the
+// bracket is padded with random copies of those same teams so every match
+// references only countries that actually participated.
 type footballCompetitor struct {
-	graph  *model.TeamGraph // nil for filler teams
-	filler string           // country name when graph is nil
+	graph *model.TeamGraph
 }
 
-func (c *footballCompetitor) teamID() int64 {
-	if c.graph != nil {
-		return c.graph.TeamID
-	}
-	return 0
-}
-
-func (c *footballCompetitor) countryID() int64 {
-	if c.graph != nil {
-		return c.graph.CountryID
-	}
-	return 0
-}
-
-func (c *footballCompetitor) name() string {
-	if c.graph != nil {
-		return c.graph.CountryName
-	}
-	return c.filler
-}
-
-func (c *footballCompetitor) real() bool { return c.graph != nil }
+func (c *footballCompetitor) teamID() int64    { return c.graph.TeamID }
+func (c *footballCompetitor) countryID() int64 { return c.graph.CountryID }
+func (c *footballCompetitor) name() string     { return c.graph.CountryName }
 
 // realizeFootball invents a full knockout tournament for a football event and
-// stores it as one Mongo document. The four semifinalists (real teams when
-// available) define the medals: champion -> gold, finalist -> silver, winner of
-// the bronze match -> bronze. Early rounds are padded with filler teams so the
-// document always contains octavos, cuartos, semifinal and final.
+// stores it as one Mongo document. The four semifinalists define the medals:
+// champion -> gold, finalist -> silver, winner of the bronze match -> bronze.
+// When fewer than 16 teams are entered, the early rounds are padded with copies
+// of those same teams so every match references a participating country.
 func (s *Service) realizeFootball(ctx context.Context, event *model.Event, graphs []*model.TeamGraph, summary *model.RealizeSummary) (*model.RealizeSummary, error) {
 	field := buildFootballField(graphs)
 
@@ -97,21 +69,25 @@ func (s *Service) realizeFootball(ctx context.Context, event *model.Event, graph
 		{"round": "tercer_puesto", "matches": tercerPuesto},
 	}
 
-	// Register participation for the real teams and award the podium medals.
+	// Each registered team participates once (graphs has no duplicates even if
+	// the field does, because the field is padded with copies for the bracket).
+	for _, g := range graphs {
+		if err := s.RegisterParticipation(ctx, g.TeamID); err != nil {
+			return nil, fmt.Errorf("register participation (team %d): %w", g.TeamID, err)
+		}
+	}
+	// Podium goes to the top three semifinalists, which always sit in the front
+	// (real) slots of the field.
 	medals := map[*footballCompetitor]model.MedalType{champion: model.Gold, runnerUp: model.Silver, bronze: model.Bronze}
 	for _, c := range field {
-		if !c.real() {
+		medal, ok := medals[c]
+		if !ok {
 			continue
 		}
-		if err := s.RegisterParticipation(ctx, c.graph.TeamID); err != nil {
-			return nil, fmt.Errorf("register participation (team %d): %w", c.graph.TeamID, err)
+		if err := s.AwardMedal(ctx, c.graph.TeamID, medal); err != nil {
+			return nil, fmt.Errorf("award medal (team %d): %w", c.graph.TeamID, err)
 		}
-		if medal, ok := medals[c]; ok {
-			if err := s.AwardMedal(ctx, c.graph.TeamID, medal); err != nil {
-				return nil, fmt.Errorf("award medal (team %d): %w", c.graph.TeamID, err)
-			}
-			summary.Medals = append(summary.Medals, fmt.Sprintf("%s -> %s", c.graph.CountryName, medal))
-		}
+		summary.Medals = append(summary.Medals, fmt.Sprintf("%s -> %s", c.graph.CountryName, medal))
 	}
 
 	first := graphs[0]
@@ -139,8 +115,11 @@ func (s *Service) realizeFootball(ctx context.Context, event *model.Event, graph
 	return summary, nil
 }
 
-// buildFootballField returns exactly footballBracketSize competitors: the real
-// teams first (already shuffled by the caller), padded with filler teams.
+// buildFootballField returns exactly footballBracketSize competitors. The real
+// teams (already shuffled by the caller) take the front slots — that's where
+// the semifinalists / podium come from — and any remaining slots are padded
+// with random samples of the same real teams so every match in the bracket is
+// played between countries that actually participated in the event.
 func buildFootballField(graphs []*model.TeamGraph) []*footballCompetitor {
 	field := make([]*footballCompetitor, 0, footballBracketSize)
 	for _, g := range graphs {
@@ -149,14 +128,8 @@ func buildFootballField(graphs []*model.TeamGraph) []*footballCompetitor {
 			return field
 		}
 	}
-	fillers := append([]string(nil), fillerCountries...)
-	rand.Shuffle(len(fillers), func(i, j int) { fillers[i], fillers[j] = fillers[j], fillers[i] })
 	for len(field) < footballBracketSize {
-		name := fmt.Sprintf("Selección %d", len(field)+1)
-		if len(fillers) > 0 {
-			name, fillers = fillers[0], fillers[1:]
-		}
-		field = append(field, &footballCompetitor{filler: name})
+		field = append(field, &footballCompetitor{graph: graphs[rand.Intn(len(graphs))]})
 	}
 	return field
 }
@@ -244,7 +217,7 @@ func inventGoals(c *footballCompetitor, score int) []map[string]any {
 }
 
 func footballScorer(c *footballCompetitor, i int) (int64, string) {
-	if c.real() && len(c.graph.Athletes) > 0 {
+	if len(c.graph.Athletes) > 0 {
 		a := c.graph.Athletes[rand.Intn(len(c.graph.Athletes))]
 		return a.ID, a.Name
 	}
