@@ -28,7 +28,8 @@ logs:
 	docker compose logs -f app
 
 run:
-	go run ./cmd/server
+	@echo "==> Seeding in background (waits for /healthz, then seeds via the API)"
+	@./scripts/seed.sh & go run ./cmd/server
 
 console:
 	go run ./cmd/console

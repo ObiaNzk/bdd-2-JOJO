@@ -1,84 +1,89 @@
+```mermaid
 erDiagram
   DEPORTE ||--o{ DISCIPLINA : "agrupa"
   DISCIPLINA ||--o{ EVENTO : "se compite en"
   JUEGO_OLIMPICO ||--o{ EVENTO : "incluye"
+  PAIS ||--o{ JUEGO_OLIMPICO : "es anfitrión"
   JUEGO_OLIMPICO ||--o{ JUEGO_OLIM_PAIS : "tiene participantes"
   PAIS ||--o{ JUEGO_OLIM_PAIS : "participa en"
   PAIS ||--o{ ATLETA : "nacionalidad"
   JUEGO_OLIM_PAIS ||--o{ EQUIPO : "inscribe"
   EVENTO ||--o{ EQUIPO : "compite en"
-  EVENTO ||--|| CALENDARIO : "se realiza en"
-  EVENTO ||--o| RESULTADOS : "tiene"
-  EVENTO ||--o| ESTADISTICAS : "registra"
   EQUIPO ||--o{ EQUIPO_ATLETA : "compuesto por"
   ATLETA ||--o{ EQUIPO_ATLETA : "integra"
-  EQUIPO ||--o| MEDALLERO : "obtiene"
+  EQUIPO ||--o{ MEDALLA : "obtiene"
+  EVENTO ||--o{ RESULTADO_EVENTO : "registra"
+  RESULTADO_EVENTO ||--o{ MARCA_RECORD : "embebe"
 
-  DEPORTE {
-    int id_deporte PK
-    string nombre
-  }
-  DISCIPLINA {
-    int id_disciplina PK
-    int id_deporte FK
-    string nombre
+  PAIS {
+    bigint id_pais PK
+    text nombre
   }
   JUEGO_OLIMPICO {
-    int id_juego PK
+    bigint id_juego PK
     int anio
-    string ciudad
+    text ciudad
+    bigint id_pais_anfitrion FK
   }
-  PAIS {
-    int id_pais PK
-    string nombre
+  DEPORTE {
+    bigint id_deporte PK
+    text nombre
   }
-  JUEGO_OLIM_PAIS {
-    int id_jo_pais PK
-    int id_juego FK
-    int id_pais FK
-  }
-  CALENDARIO {
-    int id_calendario PK
-    datetime fecha_hora
-    string sede
-  }
-  EVENTO {
-    int id_evento PK
-    int id_juego FK
-    int id_disciplina FK
-    int id_calendario FK
-    string nombre
-  }
-  EQUIPO {
-    int id_equipo PK
-    int id_jo_pais FK
-    int id_evento FK
-  }
-  EQUIPO_ATLETA {
-    int id_equipo PK "FK"
-    int id_atleta PK "FK"
+  DISCIPLINA {
+    bigint id_disciplina PK
+    bigint id_deporte FK
+    text nombre
   }
   ATLETA {
-    int id_atleta PK
-    int id_pais FK
-    string nombre
+    bigint id_atleta PK
+    bigint id_pais FK
+    text nombre
   }
-  RESULTADOS {
-    int id_resultado PK
-    int id_evento FK
-    int id_equipo FK
-    int posicion
-    string marca
+  JUEGO_OLIM_PAIS {
+    bigint id_jo_pais PK
+    bigint id_juego FK
+    bigint id_pais FK
   }
-  ESTADISTICAS {
-    int id_estadistica PK
-    int id_evento FK
-    int id_equipo FK
-    string metrica
-    string valor
+  EVENTO {
+    bigint id_evento PK
+    bigint id_juego FK
+    bigint id_disciplina FK
+    text nombre
+    date fecha_evento
+    boolean realizado
   }
-  MEDALLERO {
-    int id_medalla PK
-    int id_equipo FK
-    string tipo
+  EQUIPO {
+    bigint id_equipo PK
+    bigint id_jo_pais FK
+    bigint id_evento FK
   }
+  EQUIPO_ATLETA {
+    bigint id_equipo PK "FK"
+    bigint id_atleta PK "FK"
+  }
+  MEDALLA {
+    bigint id_medalla PK
+    bigint id_equipo FK
+    text tipo
+  }
+  RESULTADO_EVENTO {
+    string _id PK
+    bigint id_evento
+    text nombre_evento
+    bigint id_juego
+    text nombre_juego
+    bigint id_disciplina
+    text nombre_disciplina
+    text deporte
+    text formato
+    datetime fecha
+    object resultado
+  }
+  MARCA_RECORD {
+    bigint id_atleta
+    text nombre_atleta
+    text tipo_record
+    text metrica
+    float valor
+  }
+```

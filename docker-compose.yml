@@ -79,7 +79,7 @@ services:
     profiles: ["tools"]
     environment:
       ADMINER_DEFAULT_SERVER: postgres
-      ADMINER_DESIGN: dracula
+      ADMINER_DESIGN: flat
     ports:
       - "8081:8080"
     depends_on:

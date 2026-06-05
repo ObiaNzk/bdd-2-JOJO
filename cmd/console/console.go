@@ -782,7 +782,7 @@ func (c *Console) recordHolders(ctx context.Context) {
 		return
 	}
 	for _, r := range rows {
-		fmt.Printf("  %-20s %s %s=%.0f (%s)\n", r.AthleteName, r.DisciplineName, r.Metric, r.Value, r.Type)
+		fmt.Printf("  %-20s %s %s=%.0f (%s) @ %s\n", r.AthleteName, r.DisciplineName, r.Metric, r.Value, r.Type, r.GameName)
 	}
 }
 
