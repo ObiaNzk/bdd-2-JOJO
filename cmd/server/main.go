@@ -84,6 +84,9 @@ func run(logger *slog.Logger) error {
 	if err := resultRepo.EnsureIndexes(bootCtx); err != nil {
 		return err
 	}
+	if err := graphRepo.EnsureConstraints(bootCtx); err != nil {
+		return err
+	}
 
 	countriesCreated, athletesCreated, err := sqlRepo.EnsureDefaults(bootCtx)
 	if err != nil {

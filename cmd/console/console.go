@@ -82,7 +82,7 @@ func printMenu() {
    4) Crear disciplina
    5) Crear atleta
    6) Registrar país(es) en juego (uno o 'todos')
-   7) Crear evento
+   7) Crear evento (si la disciplina es de torneo, crea solo la semifinal)
    8) Crear equipo
    9) Agregar atletas a equipo (uno o varios, separados por coma)
  Ejecutar:
@@ -91,7 +91,7 @@ func printMenu() {
   11) Casos de uso (consultas del enunciado)
  Generadores:
   12) Cargar datos por defecto (países + deportistas, incluye Argentina)
-  13) Generar equipos para un evento (elegís juego y evento; crea equipos con plantel)
+  13) Generar equipos para un evento (elegís juego y evento; crea los que necesita con plantel)
    0) Salir
 `)
 }
@@ -337,6 +337,15 @@ func (c *Console) createEvent(ctx context.Context) {
 	}
 	name := c.readLine("Nombre: ")
 	date := c.askDate("Fecha (AAAA-MM-DD, vacío=hoy): ")
+
+	// Tournament disciplines are not a single event: creating one lays down only
+	// the opening round (the semifinal). The final and the bronze match are born
+	// when the semifinal is realized. Everything else is one plain event.
+	if service.ResultFormat(disciplineName(disciplines, discID)) == "tournament" {
+		c.createTournamentSemifinal(ctx, gameID, discID, name, date)
+		return
+	}
+
 	ev := &model.Event{GameID: gameID, DisciplineID: discID, Name: name, Date: date}
 	if err := c.db.CreateEvent(ctx, ev); err != nil {
 		c.fail(err)
@@ -347,6 +356,46 @@ func (c *Console) createEvent(ctx context.Context) {
 		return
 	}
 	fmt.Printf("  ok: evento #%d creado\n", ev.ID)
+}
+
+// createTournamentSemifinal lays down only the opening round of a knockout
+// tournament: an empty semifinal. The final and the bronze match are created
+// when the semifinal is realized — that is when the teams that reach them are
+// known — so they do not exist (and cannot be picked) until then.
+func (c *Console) createTournamentSemifinal(ctx context.Context, gameID, discID int64, name string, base time.Time) {
+	semi := &model.Event{GameID: gameID, DisciplineID: discID, Name: "Semifinal " + name, Date: base, Phase: "semifinal"}
+	if err := c.createTournamentEvent(ctx, semi); err != nil {
+		return
+	}
+
+	fmt.Printf("  ok: torneo creado -> semifinal #%d\n", semi.ID)
+	fmt.Printf("  siguiente: asigná 4 equipos a la semifinal #%d (opción 8 o 13) y realizala (opción 10).\n", semi.ID)
+	fmt.Println("            al realizar la semifinal se crean la final y el tercer puesto con sus equipos.")
+}
+
+// disciplineName resolves a discipline id to its name within an already-loaded
+// slice (empty string if not found).
+func disciplineName(disciplines []model.Discipline, id int64) string {
+	for _, d := range disciplines {
+		if d.ID == id {
+			return d.Name
+		}
+	}
+	return ""
+}
+
+// createTournamentEvent persists one tournament event and mirrors it to Neo4j,
+// reporting any failure to the console.
+func (c *Console) createTournamentEvent(ctx context.Context, ev *model.Event) error {
+	if err := c.db.CreateEvent(ctx, ev); err != nil {
+		c.fail(err)
+		return err
+	}
+	if err := c.svc.SyncEvent(ctx, ev); err != nil {
+		c.fail(err)
+		return err
+	}
+	return nil
 }
 
 func (c *Console) createTeam(ctx context.Context) {
@@ -374,6 +423,10 @@ func (c *Console) createTeam(ctx context.Context) {
 	ev, err := c.db.GetEventByID(ctx, eventID)
 	if err != nil {
 		c.fail(err)
+		return
+	}
+	if ev.PreviousEventID != nil {
+		fmt.Println("  ! ese evento recibe sus equipos al realizar la ronda anterior (semifinal); no se le asignan a mano")
 		return
 	}
 	c.printCountries(ctx)
@@ -505,9 +558,37 @@ func (c *Console) realizeEvent(ctx context.Context) {
 	if !c.require(len(events), "creá un evento (opción 7) y generale equipos (opción 13)") {
 		return
 	}
-	c.printEvents(ctx)
+	// An event is realizable only once its previous round is realized: the final
+	// and the bronze match get their teams from the semifinal, so they cannot run
+	// (and must not appear) until it is realized.
+	realized := make(map[int64]bool, len(events))
+	for _, r := range events {
+		realized[r.ID] = r.Realized
+	}
+	ready := make([]model.Event, 0, len(events))
+	for _, r := range events {
+		if r.Realized {
+			continue
+		}
+		if r.PreviousEventID == nil || realized[*r.PreviousEventID] {
+			ready = append(ready, r)
+		}
+	}
+	if !c.require(len(ready), "no hay eventos listos para realizar (realizá primero la semifinal, o creá uno nuevo con la opción 7)") {
+		return
+	}
+	fmt.Println("  eventos listos para realizar:")
+	readyByID := make(map[int64]bool, len(ready))
+	for _, r := range ready {
+		readyByID[r.ID] = true
+		fmt.Printf("    #%d %s (juego #%d, disciplina #%d)\n", r.ID, r.Name, r.GameID, r.DisciplineID)
+	}
 	eventID, ok := c.askInt("ID evento a realizar: ")
 	if !ok {
+		return
+	}
+	if !readyByID[eventID] {
+		fmt.Println("  ! ese evento no está listo: o ya fue realizado, o depende de una ronda previa que todavía no realizaste")
 		return
 	}
 	summary, err := c.svc.RealizeEvent(ctx, eventID)
@@ -515,8 +596,8 @@ func (c *Console) realizeEvent(ctx context.Context) {
 		c.fail(err)
 		return
 	}
-	fmt.Printf("  ok: evento %q realizado (%s / %s, formato=%s)\n",
-		summary.EventName, summary.DisciplineName, summary.Sport, summary.Format)
+	fmt.Printf("  ok: evento %q realizado (%s / %s)\n",
+		summary.EventName, summary.DisciplineName, summary.Sport)
 	fmt.Printf("       participantes: %d, records: %d\n", summary.Participants, summary.Records)
 	for _, m := range summary.Medals {
 		fmt.Printf("       medalla: %s\n", m)
@@ -541,10 +622,11 @@ func (c *Console) loadDefaults(ctx context.Context) {
 	fmt.Printf("  ok: datos por defecto cargados (%d países nuevos, %d deportistas nuevos)\n", newCountries, newAthletes)
 }
 
-// generateTeamsForEvent picks a game and one of its events, then creates N teams
-// for it, each for a different country, filled with the discipline's roster size
-// (11 for football, 1 otherwise). Countries are auto-registered in the game and
-// athletes are created on the fly when a country is short.
+// generateTeamsForEvent picks a game and one of its events, then creates exactly
+// the teams the event needs (4 for a tournament semifinal, teamsPerEvent
+// otherwise) without asking — one per country, filled with the discipline's
+// roster size (11 for football, 1 otherwise). Countries are auto-registered in
+// the game and athletes are created on the fly when a country is short.
 func (c *Console) generateTeamsForEvent(ctx context.Context) {
 	games, err := c.db.ListOlympicGames(ctx)
 	if err != nil {
@@ -569,21 +651,48 @@ func (c *Console) generateTeamsForEvent(ctx context.Context) {
 		fmt.Println("  (este juego no tiene eventos; creá uno con la opción 7)")
 		return
 	}
-	fmt.Printf("  eventos del juego #%d:\n", gameID)
+	// Only root events take teams directly (the final and the bronze match get
+	// theirs when the semifinal is realized, so they carry a previous_event_id and
+	// are skipped). Events that are already realized, or that already hold their
+	// full complement of teams, are left out too — there is nothing to add to them.
+	fmt.Printf("  eventos del juego #%d con cupo para equipos:\n", gameID)
+	selectable := make(map[int64]bool)
 	for _, e := range events {
-		fmt.Printf("    #%d %s (disciplina #%d)\n", e.ID, e.Name, e.DisciplineID)
+		if e.PreviousEventID != nil || e.Realized {
+			continue
+		}
+		dn, err := c.disciplineName(ctx, e.DisciplineID)
+		if err != nil {
+			c.fail(err)
+			return
+		}
+		teams, err := c.db.ListTeamsByEventWithCountry(ctx, e.ID)
+		if err != nil {
+			c.fail(err)
+			return
+		}
+		target := eventTeamTarget(dn)
+		if len(teams) >= target {
+			continue // ya tiene todos sus equipos
+		}
+		fmt.Printf("    #%d %s (disciplina #%d) — %d/%d equipos\n", e.ID, e.Name, e.DisciplineID, len(teams), target)
+		selectable[e.ID] = true
+	}
+	if len(selectable) == 0 {
+		fmt.Println("  (no hay eventos con cupo: ya tienen sus equipos o ya fueron realizados; creá uno con la opción 7)")
+		return
 	}
 	eventID, ok := c.askInt("ID evento: ")
 	if !ok {
 		return
 	}
+	if !selectable[eventID] {
+		fmt.Println("  ! ese evento no está en la lista (no es de este juego, ya está completo/realizado, o recibe equipos de una ronda previa)")
+		return
+	}
 	event, err := c.db.GetEventByID(ctx, eventID)
 	if err != nil {
 		c.fail(err)
-		return
-	}
-	if event.GameID != gameID {
-		fmt.Println("  ! ese evento no pertenece al juego elegido")
 		return
 	}
 
@@ -593,6 +702,7 @@ func (c *Console) generateTeamsForEvent(ctx context.Context) {
 		return
 	}
 	roster := rosterSizeForDiscipline(discName)
+	targetTeams := eventTeamTarget(discName)
 
 	teamed := map[int64]bool{}
 	existingTeams, err := c.db.ListTeamsByEventWithCountry(ctx, eventID)
@@ -602,6 +712,12 @@ func (c *Console) generateTeamsForEvent(ctx context.Context) {
 	}
 	for _, t := range existingTeams {
 		teamed[t.CountryID] = true
+	}
+
+	slots := targetTeams - len(existingTeams)
+	if slots <= 0 {
+		fmt.Printf("  (el evento ya tiene %d equipo(s); necesita %d)\n", len(existingTeams), targetTeams)
+		return
 	}
 
 	countries, err := c.db.ListCountries(ctx)
@@ -623,17 +739,16 @@ func (c *Console) generateTeamsForEvent(ctx context.Context) {
 		return
 	}
 
-	fmt.Printf("  disciplina %q -> %d deportista(s) por equipo; países disponibles: %d\n", discName, roster, len(candidates))
-	count, ok := c.askInt(fmt.Sprintf("¿Cuántos equipos generar? (máx %d): ", len(candidates)))
-	if !ok {
-		return
+	// Generate the missing teams, capped by how many countries are still free.
+	count := slots
+	if count > len(candidates) {
+		count = len(candidates)
 	}
-	if count > int64(len(candidates)) {
-		count = int64(len(candidates))
-	}
+	fmt.Printf("  disciplina %q -> %d deportista(s) por equipo; genero %d equipo(s) (objetivo %d)\n",
+		discName, roster, count, targetTeams)
 
 	generated := 0
-	for i := int64(0); i < count; i++ {
+	for i := 0; i < count; i++ {
 		co := candidates[i]
 		gcID, err := c.ensureGameCountry(ctx, gameID, co.ID)
 		if err != nil {
@@ -669,8 +784,14 @@ func (c *Console) generateTeamsForEvent(ctx context.Context) {
 		fmt.Printf("  ok: equipo #%d (%s) con %d deportista(s)\n", team.ID, co.Name, added)
 		generated++
 	}
-	fmt.Printf("  %d equipo(s) generado(s) en el evento #%d\n", generated, eventID)
-	if generated >= 3 {
+	total := len(existingTeams) + generated
+	fmt.Printf("  %d equipo(s) generado(s) en el evento #%d (total: %d)\n", generated, eventID, total)
+	switch {
+	case total < targetTeams:
+		fmt.Printf("  -> faltan %d equipo(s) para los %d que necesita el evento (cargá más países con la opción 1 o 12)\n", targetTeams-total, targetTeams)
+	case service.ResultFormat(discName) == "tournament":
+		fmt.Println("  -> 4 equipos: realizá la semifinal (opción 10) y se asignan solos a la final y al tercer puesto")
+	default:
 		fmt.Println("  -> listo para 'Realizar evento' (opción 10)")
 	}
 }
@@ -699,6 +820,19 @@ func (c *Console) disciplineName(ctx context.Context, id int64) (string, error) 
 		}
 	}
 	return "", fmt.Errorf("disciplina #%d no encontrada", id)
+}
+
+// teamsPerEvent is the unified number of teams generated for a single (non
+// tournament) event. Tournaments override it with exactly 4 for their semifinal.
+const teamsPerEvent = 8
+
+// eventTeamTarget is how many teams an event needs: 4 for a tournament semifinal,
+// teamsPerEvent for any single event.
+func eventTeamTarget(discName string) int {
+	if service.ResultFormat(discName) == "tournament" {
+		return 4
+	}
+	return teamsPerEvent
 }
 
 // rosterSizeForDiscipline maps a discipline to how many athletes a team needs:

@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 
@@ -20,6 +22,30 @@ func (r *Neo4jRepository) write(ctx context.Context, cypher string, params map[s
 	_, err := neo4j.ExecuteQuery(ctx, r.driver, cypher, params,
 		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	return err
+}
+
+// graphLabels are every node label keyed by an `id` property. Each one gets a
+// uniqueness constraint so MERGE on {id} can never create a duplicate.
+var graphLabels = []string{
+	"Country", "OlympicGame", "Sport", "Discipline", "Athlete", "Event", "Team", "Medal",
+}
+
+// EnsureConstraints declares a uniqueness constraint on the `id` of every node
+// label. Without it, two transactions that MERGE the same not-yet-existing node
+// concurrently (e.g. the server container and a local console both running
+// SyncBaseEntities at startup) each create it, duplicating base entities. The
+// constraint also serves as a backing index for MERGE/MATCH on id. It is
+// idempotent (IF NOT EXISTS) and run at startup alongside the Mongo indexes.
+func (r *Neo4jRepository) EnsureConstraints(ctx context.Context) error {
+	for _, label := range graphLabels {
+		cypher := fmt.Sprintf(
+			"CREATE CONSTRAINT unique_%s_id IF NOT EXISTS FOR (n:%s) REQUIRE n.id IS UNIQUE",
+			strings.ToLower(label), label)
+		if err := r.write(ctx, cypher, nil); err != nil {
+			return fmt.Errorf("neo4j: ensure constraint for %s: %w", label, err)
+		}
+	}
+	return nil
 }
 
 // --- Entity upserts (mirror base entities into the graph as they are created) ---

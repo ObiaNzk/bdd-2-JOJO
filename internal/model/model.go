@@ -49,9 +49,15 @@ type Event struct {
 	DisciplineID int64     `json:"disciplineId"`
 	Name         string    `json:"name"`
 	Date         time.Time `json:"date"`
+	// Phase names the tournament round when the event is one ("semifinal",
+	// "final", "tercer_puesto"); it is empty for single-event disciplines.
+	// PreviousEventID chains a round back to the one it advances from (the final
+	// and the bronze match both point to their semifinal); it is nil otherwise.
+	Phase           string `json:"phase,omitempty"`
+	PreviousEventID *int64 `json:"previousEventId,omitempty"`
 	// Realized is set once the event has been realized, so the fan-out cannot run
-	// twice for the same event. An event spans the whole competition (all the
-	// qualifying rounds up to the final), so it always culminates in medals.
+	// twice for the same event. Only the deciding rounds (final, tercer_puesto)
+	// award medals; the earlier rounds just advance teams to the next event.
 	Realized bool `json:"realized"`
 }
 
@@ -74,7 +80,7 @@ type Medal struct {
 }
 
 // EventResult is the Mongo document: the full, type-specific outcome of one
-// olympic event. Result is intentionally schema-flexible because each Format
+// olympic event. Result is intentionally schema-flexible because each discipline
 // records its outcome differently (finishing order for a race, attempts per
 // athlete for a field event, judged scores for gymnastics...). Persons are
 // embedded as snapshots inside Result so the document reads on its own without
@@ -88,7 +94,6 @@ type EventResult struct {
 	DisciplineID   int64          `json:"disciplineId" bson:"disciplineId"`
 	DisciplineName string         `json:"disciplineName" bson:"disciplineName"`
 	Sport          string         `json:"sport" bson:"sport"`
-	Format         string         `json:"format" bson:"format"`
 	Date           time.Time      `json:"date" bson:"date"`
 	Result         map[string]any `json:"result" bson:"result"`
 	Records        []RecordMark   `json:"records,omitempty" bson:"records,omitempty"`
@@ -215,7 +220,6 @@ type RealizeSummary struct {
 	EventName      string
 	DisciplineName string
 	Sport          string
-	Format         string
 	Participants   int
 	Medals         []string
 	Records        int

@@ -19,6 +19,12 @@ type SQLStore interface {
 	ListTeamsByEvent(ctx context.Context, eventID int64) ([]int64, error)
 	MarkEventRealized(ctx context.Context, eventID int64) error
 	CreateMedal(ctx context.Context, m *model.Medal) error
+	// Used by the tournament fan-out: realising the semifinal creates the final
+	// and the bronze match and advances the winners/losers into them.
+	CreateEvent(ctx context.Context, e *model.Event) error
+	CreateTeam(ctx context.Context, t *model.Team) error
+	AddAthleteToTeam(ctx context.Context, teamID, athleteID int64) error
+	GetGameCountryID(ctx context.Context, gameID, countryID int64) (int64, error)
 	CountMedalsByCountryInGame(ctx context.Context, gameID int64) ([]model.MedalCount, error)
 	ListEventsByPopularity(ctx context.Context, gameID int64, limit int) ([]model.EventPopularity, error)
 	GetHostByGame(ctx context.Context, gameID int64) (*model.HostInfo, error)
@@ -28,6 +34,7 @@ type SQLStore interface {
 	ListSports(ctx context.Context) ([]model.Sport, error)
 	ListDisciplines(ctx context.Context) ([]model.Discipline, error)
 	ListEvents(ctx context.Context) ([]model.Event, error)
+	ListGameCountries(ctx context.Context) ([]model.GameCountry, error)
 	ListAthletesByCountry(ctx context.Context, countryID int64) ([]model.Athlete, error)
 }
 
@@ -233,6 +240,19 @@ func (s *Service) SyncBaseEntities(ctx context.Context) error {
 	}
 	for i := range events {
 		if err := s.graph.UpsertEvent(ctx, &events[i]); err != nil {
+			return err
+		}
+	}
+
+	// Mirror the country-in-game participations so Neo4j has the direct
+	// Country-[:PARTICIPATES_IN]->OlympicGame edge (the seed loads game_countries
+	// straight into Postgres, so without this the edge would never appear).
+	gameCountries, err := s.sql.ListGameCountries(ctx)
+	if err != nil {
+		return err
+	}
+	for _, gc := range gameCountries {
+		if err := s.graph.LinkCountryToGame(ctx, gc.GameID, gc.CountryID); err != nil {
 			return err
 		}
 	}

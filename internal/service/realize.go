@@ -16,8 +16,10 @@ import (
 // Setting up entities only touches Postgres; "realizing" the event is what fans
 // medals, results and records out across all four stores.
 //
-// An event spans the whole competition up to the final, so it always awards a
-// podium: it requires at least 3 teams, failing up front before writing anything.
+// Single-event disciplines (race / field) require at least 3 teams and award a
+// full podium. Tournament events are one round each: the team-count requirement
+// and the medals depend on the phase (see realizeTournament), so the validation
+// for those lives there.
 func (s *Service) RealizeEvent(ctx context.Context, eventID int64) (*model.RealizeSummary, error) {
 	event, err := s.sql.GetEventByID(ctx, eventID)
 	if err != nil {
@@ -30,8 +32,8 @@ func (s *Service) RealizeEvent(ctx context.Context, eventID int64) (*model.Reali
 	if err != nil {
 		return nil, err
 	}
-	if len(teamIDs) < 3 {
-		return nil, fmt.Errorf("event %d requires at least 3 teams, got %d", eventID, len(teamIDs))
+	if len(teamIDs) == 0 {
+		return nil, fmt.Errorf("event %d has no teams", eventID)
 	}
 
 	// Random finishing order.
@@ -47,26 +49,33 @@ func (s *Service) RealizeEvent(ctx context.Context, eventID int64) (*model.Reali
 	}
 
 	first := graphs[0]
+	// resultFormat decides which builder simulates the event; it is internal
+	// dispatch only and is not persisted in the Mongo document.
 	format := resultFormat(first.DisciplineName)
 	summary := &model.RealizeSummary{
 		EventID:        eventID,
 		EventName:      first.EventName,
 		DisciplineName: first.DisciplineName,
 		Sport:          first.SportName,
-		Format:         format,
 	}
 
 	// Each discipline invents its own type-specific Mongo document:
-	//   - football -> a knockout tournament   (realize_football.go)
-	//   - swimming -> a timed final           (realize_swimming.go)
+	//   - tournament -> one knockout round     (realize_tournament.go)
+	//   - swimming   -> a timed final          (realize_swimming.go)
 	//   - pole vault -> a field-attempt card   (realize_vault.go)
 	var out *model.RealizeSummary
 	switch format {
 	case "tournament":
-		out, err = s.realizeFootball(ctx, event, graphs, summary)
+		out, err = s.realizeTournament(ctx, event, graphs, summary)
 	case "race":
+		if len(graphs) < 3 {
+			return nil, fmt.Errorf("event %d requires at least 3 teams, got %d", eventID, len(graphs))
+		}
 		out, err = s.realizeSwimming(ctx, event, graphs, summary)
 	case "field_attempts":
+		if len(graphs) < 3 {
+			return nil, fmt.Errorf("event %d requires at least 3 teams, got %d", eventID, len(graphs))
+		}
 		out, err = s.realizeVault(ctx, event, graphs, summary)
 	default:
 		return nil, fmt.Errorf("unknown result format %q for discipline %q", format, first.DisciplineName)
@@ -80,6 +89,11 @@ func (s *Service) RealizeEvent(ctx context.Context, eventID int64) (*model.Reali
 	}
 	return out, nil
 }
+
+// ResultFormat reports the result shape for a discipline name ("tournament",
+// "field_attempts" or "race"). Exported so callers such as the console can tell
+// tournament disciplines apart (to create their chained rounds) before realizing.
+func ResultFormat(discipline string) string { return resultFormat(discipline) }
 
 // resultFormat picks the Mongo document shape from the discipline name: football
 // is a knockout tournament, pole vault / jumps record height attempts, and

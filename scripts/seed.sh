@@ -5,13 +5,17 @@
 # realized by its own builder in the service:
 #   - Natación 100m Libre  -> "race"           (carriles, parciales y tiempos en s)
 #   - Salto con garrocha   -> "field_attempts" (alturas e intentos O/X/- en m)
-#   - Fútbol 11            -> "tournament"     (cuadro octavos->final, goles y stats)
+#   - Fútbol 11            -> "tournament"     (torneo encadenado por edición:
+#                            semifinal -> final + tercer puesto; la final y el
+#                            tercer puesto se CREAN al realizar la semifinal, que
+#                            propaga ganadores/perdedores; medallas solo en esas
+#                            dos rondas finales)
 #
 # Países: el script elige una cantidad aleatoria entre 16 y 20 de una lista
-# maestra. El mínimo (16) es lo que necesita una ronda de octavos completa para
-# que ningún equipo de fútbol sea filler. Para cada evento, un subconjunto
-# aleatorio de los países entrados al juego forma los equipos (16 para fútbol;
-# 4..8 para los individuales). Para que el caso 4 (atletas en múltiples
+# maestra. Para cada evento individual, un subconjunto aleatorio de los países
+# entrados al juego forma los equipos (4..8). El fútbol siembra 4 equipos en la
+# semifinal de cada edición; la final y el tercer puesto se crean al realizar la
+# semifinal. Para que el caso 4 (atletas en múltiples
 # disciplinas) tenga datos, en algunos países el nadador se agrega también al
 # equipo de garrocha.
 #
@@ -47,7 +51,9 @@ docker compose exec -T neo4j cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" \
   "MATCH (n) DETACH DELETE n" >/dev/null
 
 # Cantidad aleatoria de países entre 16 y 20. Los primeros tres del master
-# (USA, Francia, Japón) son sedes y siempre quedan incluidos.
+# (USA, Francia, Japón) son sedes y siempre quedan incluidos. El fútbol ya solo
+# necesita 4 equipos para la semifinal; mantenemos el rango amplio para darle
+# variedad de países a los eventos individuales.
 N=$((16 + RANDOM % 5))
 echo "==> Seeding ${N} países (aleatorio entre 16 y 20) en 3 ediciones"
 
@@ -103,13 +109,24 @@ SELECT g.id, c.id
 FROM olympic_games g CROSS JOIN countries c
 ORDER BY g.id, c.id;
 
--- 9 eventos: uno por (juego, disciplina).
+-- Eventos individuales (natación, garrocha): un único "Final" por (juego,
+-- disciplina), sin fase ni evento previo.
 INSERT INTO events (game_id, discipline_id, name, event_date)
 SELECT g.id, d.id,
        'Final ' || d.name || ' ' || g.city,
        make_date(g.year, 8, 1)
 FROM olympic_games g CROSS JOIN disciplines d
+WHERE d.name <> 'Fútbol 11'
 ORDER BY g.id, d.id;
+
+-- Fútbol: solo se siembra la semifinal de cada edición. La final y el tercer
+-- puesto los crea el servicio al realizar la semifinal (con sus equipos ya
+-- propagados), así que aquí no se insertan.
+INSERT INTO events (game_id, discipline_id, name, event_date, phase)
+SELECT g.id, d.id, 'Semifinal Fútbol ' || g.city, make_date(g.year, 8, 1), 'semifinal'
+FROM olympic_games g CROSS JOIN disciplines d
+WHERE d.name = 'Fútbol 11'
+ORDER BY g.id;
 
 -- Atletas: 1 nadador + 1 garrochista + 11 futbolistas por país.
 INSERT INTO athletes (country_id, name)
@@ -124,7 +141,8 @@ FROM countries c CROSS JOIN generate_series(1, 11) g
 ORDER BY c.id, g;
 
 -- Equipos:
---   * Fútbol: 16 países (ronda de 16 sin filler).
+--   * Fútbol: 4 países, solo en la semifinal (la final y el tercer puesto se
+--     crean con sus equipos al realizarla).
 --   * Individuales: 4..8 países random por evento (siempre >= 3).
 INSERT INTO teams (game_country_id, event_id)
 SELECT gc.id, e.id
@@ -135,9 +153,9 @@ CROSS JOIN LATERAL (
   FROM game_countries gc
   WHERE gc.game_id = e.game_id
   ORDER BY random()
-  LIMIT 16
+  LIMIT 4
 ) gc
-WHERE d.name = 'Fútbol 11';
+WHERE d.name = 'Fútbol 11' AND e.phase = 'semifinal';
 
 INSERT INTO teams (game_country_id, event_id)
 SELECT gc.id, e.id
@@ -175,7 +193,8 @@ FROM teams t
 JOIN events e          ON e.id = t.event_id
 JOIN disciplines d     ON d.id = e.discipline_id AND d.name = 'Fútbol 11'
 JOIN game_countries gc ON gc.id = t.game_country_id
-JOIN athletes a        ON a.country_id = gc.country_id AND a.name LIKE 'Futbolista %';
+JOIN athletes a        ON a.country_id = gc.country_id AND a.name LIKE 'Futbolista %'
+WHERE e.phase = 'semifinal';
 
 -- Multi-disciplina (case 4): hasta 3 pares (juego, país) donde el país tiene
 -- equipo en natación y en salto. Para esos, agregamos al nadador como atleta
@@ -207,6 +226,21 @@ FROM overlap o
 JOIN athletes a ON a.country_id = o.country_id AND a.name LIKE 'Nadador %';
 SQL
 
+# El SQL de arriba cargó game_countries (y el resto de las entidades base) por
+# acceso directo, después de que el app ya había arrancado y de haber flusheado
+# Neo4j. Reiniciamos el app para que su SyncBaseEntities vuelva a espejar las
+# entidades base al grafo —incluida Country-[:PARTICIPATES_IN]->OlympicGame— ahora
+# que esos datos ya existen.
+echo "==> Restarting app to mirror base entities (incl. country-in-game) to Neo4j"
+docker compose restart app >/dev/null
+for _ in $(seq 1 30); do
+  if curl -fsS "${APP_URL}/healthz" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+curl -fsS "${APP_URL}/healthz" >/dev/null
+
 api_post() {
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${APP_URL}$1" \
@@ -217,11 +251,21 @@ api_post() {
   esac
 }
 
-# Realizamos los 9 eventos (3 por edición).
-echo "==> Realizing 9 events via the API (POST /events/{id}/realize)"
-for ev in 1 2 3 4 5 6 7 8 9; do
-  api_post "/events/${ev}/realize"
-done
+# Realizamos en dos pasadas: primero los eventos sembrados (finales individuales
+# + semifinales de fútbol). Realizar una semifinal crea su final y su tercer
+# puesto con equipos, así que la segunda pasada toma esos eventos recién creados
+# (los únicos que quedan sin realizar) y los realiza.
+echo "==> Realizing events via the API (POST /events/{id}/realize)"
+realize_pending() {
+  local ids
+  ids=$(docker compose exec -T postgres psql -U app -d app -tA -c \
+    "SELECT id FROM events WHERE NOT realized ORDER BY (previous_event_id IS NOT NULL), game_id, id;")
+  for ev in ${ids}; do
+    api_post "/events/${ev}/realize"
+  done
+}
+realize_pending   # finales individuales + semifinales de fútbol
+realize_pending   # finales y terceros puestos creados al realizar las semifinales
 echo
 
 echo "==> Neo4j graph summary"
@@ -238,4 +282,4 @@ echo "      curl -s ${APP_URL}/records | jq"
 echo "      curl -s ${APP_URL}/top-athletes?min=2 | jq                        # cross-games"
 echo "      curl -s ${APP_URL}/countries/1/medals-by-discipline | jq          # cross-games"
 echo "      curl -s '${APP_URL}/event-results?discipline=2' | jq              # salto con garrocha"
-echo "      curl -s '${APP_URL}/event-results?discipline=3' | jq              # fútbol (cuadro completo)"
+echo "      curl -s '${APP_URL}/event-results?discipline=3' | jq              # fútbol (semifinal/final/tercer puesto)"

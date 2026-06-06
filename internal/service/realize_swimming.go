@@ -43,6 +43,7 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 				"rank":        position,
 				"athleteId":   a.ID,
 				"athleteName": a.Name,
+				"teamId":      tg.TeamID,
 				"countryId":   a.CountryID,
 				"lane":        lanes[pos],
 				"reactionS":   reactionS,
@@ -70,10 +71,8 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 		DisciplineID:   first.DisciplineID,
 		DisciplineName: first.DisciplineName,
 		Sport:          first.SportName,
-		Format:         summary.Format,
 		Date:           time.Now(),
 		Result: map[string]any{
-			"phase":       "final",
 			"poolLengthM": 50,
 			"ranking":     ranking,
 		},

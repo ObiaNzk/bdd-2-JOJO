@@ -62,6 +62,7 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 				"rank":        position,
 				"athleteId":   a.ID,
 				"athleteName": a.Name,
+				"teamId":      tg.TeamID,
 				"countryId":   a.CountryID,
 				"bestHeightM": best,
 				"attempts":    attempts,
@@ -87,10 +88,8 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 		DisciplineID:   first.DisciplineID,
 		DisciplineName: first.DisciplineName,
 		Sport:          first.SportName,
-		Format:         summary.Format,
 		Date:           time.Now(),
 		Result: map[string]any{
-			"phase":       "final",
 			"barHeightsM": barHeights,
 			"ranking":     ranking,
 		},

@@ -164,17 +164,18 @@ func (r *PostgresRepository) ListAthletesByCountry(ctx context.Context, countryI
 
 func (r *PostgresRepository) CreateEvent(ctx context.Context, e *model.Event) error {
 	return r.db.QueryRow(ctx,
-		`INSERT INTO events (game_id, discipline_id, name, event_date)
-		 VALUES ($1, $2, $3, $4) RETURNING id`,
-		e.GameID, e.DisciplineID, e.Name, e.Date,
+		`INSERT INTO events (game_id, discipline_id, name, event_date, phase, previous_event_id)
+		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6) RETURNING id`,
+		e.GameID, e.DisciplineID, e.Name, e.Date, e.Phase, e.PreviousEventID,
 	).Scan(&e.ID)
 }
 
 func (r *PostgresRepository) GetEventByID(ctx context.Context, id int64) (*model.Event, error) {
 	var e model.Event
 	err := r.db.QueryRow(ctx,
-		`SELECT id, game_id, discipline_id, name, event_date, realized FROM events WHERE id = $1`, id,
-	).Scan(&e.ID, &e.GameID, &e.DisciplineID, &e.Name, &e.Date, &e.Realized)
+		`SELECT id, game_id, discipline_id, name, event_date, COALESCE(phase, ''), previous_event_id, realized
+		 FROM events WHERE id = $1`, id,
+	).Scan(&e.ID, &e.GameID, &e.DisciplineID, &e.Name, &e.Date, &e.Phase, &e.PreviousEventID, &e.Realized)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +198,8 @@ func (r *PostgresRepository) ListEventsByDiscipline(ctx context.Context, discipl
 
 func (r *PostgresRepository) listEvents(ctx context.Context, where string, arg int64) ([]model.Event, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id, game_id, discipline_id, name, event_date, realized FROM events `+where+` ORDER BY id`, arg)
+		`SELECT id, game_id, discipline_id, name, event_date, COALESCE(phase, ''), previous_event_id, realized
+		 FROM events `+where+` ORDER BY id`, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +208,7 @@ func (r *PostgresRepository) listEvents(ctx context.Context, where string, arg i
 	var out []model.Event
 	for rows.Next() {
 		var e model.Event
-		if err := rows.Scan(&e.ID, &e.GameID, &e.DisciplineID, &e.Name, &e.Date, &e.Realized); err != nil {
+		if err := rows.Scan(&e.ID, &e.GameID, &e.DisciplineID, &e.Name, &e.Date, &e.Phase, &e.PreviousEventID, &e.Realized); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -478,7 +480,8 @@ func (r *PostgresRepository) ListDisciplines(ctx context.Context) ([]model.Disci
 
 func (r *PostgresRepository) ListEvents(ctx context.Context) ([]model.Event, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id, game_id, discipline_id, name, event_date, realized FROM events ORDER BY id`)
+		`SELECT id, game_id, discipline_id, name, event_date, COALESCE(phase, ''), previous_event_id, realized
+		 FROM events ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +490,7 @@ func (r *PostgresRepository) ListEvents(ctx context.Context) ([]model.Event, err
 	var out []model.Event
 	for rows.Next() {
 		var e model.Event
-		if err := rows.Scan(&e.ID, &e.GameID, &e.DisciplineID, &e.Name, &e.Date, &e.Realized); err != nil {
+		if err := rows.Scan(&e.ID, &e.GameID, &e.DisciplineID, &e.Name, &e.Date, &e.Phase, &e.PreviousEventID, &e.Realized); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -535,6 +538,27 @@ func (r *PostgresRepository) ListTeamsByEventWithCountry(ctx context.Context, ev
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListGameCountries returns every country-in-game participation row, used to
+// mirror the Country-[:PARTICIPATES_IN]->OlympicGame edges into Neo4j.
+func (r *PostgresRepository) ListGameCountries(ctx context.Context) ([]model.GameCountry, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, game_id, country_id FROM game_countries ORDER BY game_id, country_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []model.GameCountry
+	for rows.Next() {
+		var gc model.GameCountry
+		if err := rows.Scan(&gc.ID, &gc.GameID, &gc.CountryID); err != nil {
+			return nil, err
+		}
+		out = append(out, gc)
 	}
 	return out, rows.Err()
 }

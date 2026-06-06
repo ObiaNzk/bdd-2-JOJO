@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS events (
     discipline_id BIGINT NOT NULL REFERENCES disciplines(id),
     name          TEXT NOT NULL,
     event_date    DATE NOT NULL DEFAULT CURRENT_DATE,
-    realized      BOOLEAN NOT NULL DEFAULT FALSE
+    -- Tournament events split into chained rounds: phase names the round
+    -- ('semifinal', 'final', 'tercer_puesto') and previous_event_id points back
+    -- to the round it advances from. Non-tournament events leave both NULL.
+    phase             TEXT,
+    previous_event_id BIGINT REFERENCES events(id),
+    realized          BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS teams (
@@ -68,6 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_disciplines_sport     ON disciplines(sport_id);
 CREATE INDEX IF NOT EXISTS idx_athletes_country       ON athletes(country_id);
 CREATE INDEX IF NOT EXISTS idx_events_game            ON events(game_id);
 CREATE INDEX IF NOT EXISTS idx_events_discipline      ON events(discipline_id);
+CREATE INDEX IF NOT EXISTS idx_events_previous         ON events(previous_event_id);
 CREATE INDEX IF NOT EXISTS idx_teams_event            ON teams(event_id);
 CREATE INDEX IF NOT EXISTS idx_teams_game_country     ON teams(game_country_id);
 CREATE INDEX IF NOT EXISTS idx_medals_team            ON medals(team_id);
