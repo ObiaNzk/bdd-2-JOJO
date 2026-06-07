@@ -93,5 +93,5 @@ func run() error {
 		return err
 	}
 
-	return newConsole(sqlRepo, svc).Run(ctx)
+	return newConsole(sqlRepo, svc, cacheRepo).Run(ctx)
 }

@@ -16,15 +16,17 @@ import (
 
 // Console is the interactive front-end. It uses the Postgres repository
 // directly for plain setup CRUD/listings and the service for the orchestrated
-// "realize event" fan-out and the read use cases.
+// "realize event" fan-out and the read use cases. The Redis repository is used
+// directly too, as the read-through cache that fronts every use-case query.
 type Console struct {
-	db  *repository.PostgresRepository
-	svc *service.Service
-	in  *bufio.Scanner
+	db    *repository.PostgresRepository
+	svc   *service.Service
+	cache *repository.RedisRepository
+	in    *bufio.Scanner
 }
 
-func newConsole(db *repository.PostgresRepository, svc *service.Service) *Console {
-	return &Console{db: db, svc: svc, in: bufio.NewScanner(os.Stdin)}
+func newConsole(db *repository.PostgresRepository, svc *service.Service, cache *repository.RedisRepository) *Console {
+	return &Console{db: db, svc: svc, cache: cache, in: bufio.NewScanner(os.Stdin)}
 }
 
 func (c *Console) Run(ctx context.Context) error {
@@ -847,8 +849,13 @@ func rosterSizeForDiscipline(name string) int {
 
 // --- Queries ---
 
+// useCaseCacheTTL is how long a use-case result stays served from Redis before
+// the underlying query runs again.
+const useCaseCacheTTL = 2 * time.Minute
+
 // explain prints, for a use case, the database it reads from and the query it
-// runs there. It mirrors what the repository layer actually executes.
+// runs there. It mirrors what the repository layer actually executes. Shown only
+// on a cache miss (when the query really runs).
 func (c *Console) explain(db, query string) {
 	fmt.Printf("  base de datos: %s\n", db)
 	fmt.Println("  query:")
@@ -858,20 +865,54 @@ func (c *Console) explain(db, query string) {
 	fmt.Println()
 }
 
+// fromCache is shown instead of explain when the result was served from Redis:
+// no underlying query ran, so there is none to print.
+func (c *Console) fromCache() {
+	fmt.Printf("  ✔ resultado servido desde Redis (caché, TTL %s) — no se ejecutó ninguna query\n\n", useCaseCacheTTL)
+}
+
+// fetchCached fronts a use-case query with the Redis read-through cache: it
+// returns the value stored under key if present, otherwise runs query, caches
+// its result under key (TTL useCaseCacheTTL) and returns it. The bool reports
+// whether the value came from the cache, so the caller can show `fromCache`
+// instead of `explain`. Caching is best-effort: a cache error never hides the
+// real result.
+func fetchCached[T any](c *Console, ctx context.Context, key string, query func() (T, error)) (T, bool, error) {
+	var out T
+	if hit, err := c.cache.CacheGetJSON(ctx, key, &out); err == nil && hit {
+		return out, true, nil
+	}
+	out, err := query()
+	if err != nil {
+		return out, false, err
+	}
+	if err := c.cache.CacheSetJSON(ctx, key, out, useCaseCacheTTL); err != nil {
+		fmt.Printf("  (aviso: no se pudo guardar en caché: %s)\n", err)
+	}
+	return out, false, nil
+}
+
 func (c *Console) medalRanking(ctx context.Context) {
-	c.explain("Redis", `ZREVRANGE medals:country:{gameID} 0 {N-1} WITHSCORES   -- ranking + total
-HGETALL  medals:country:{gameID}:gold                  -- desglose por tipo
-HGETALL  medals:country:{gameID}:silver
-HGETALL  medals:country:{gameID}:bronze`)
 	c.printGames(ctx)
 	gameID, ok := c.askInt("ID juego: ")
 	if !ok {
 		return
 	}
-	rows, err := c.svc.MedalRanking(ctx, gameID, 20)
+	key := fmt.Sprintf("usecase:medal-ranking:%d", gameID)
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.MedalCount, error) {
+		return c.svc.MedalRanking(ctx, gameID, 20)
+	})
 	if err != nil {
 		c.fail(err)
 		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("Redis", `ZREVRANGE medals:country:{gameID} 0 {N-1} WITHSCORES   -- ranking + total
+HGETALL  medals:country:{gameID}:gold                  -- desglose por tipo
+HGETALL  medals:country:{gameID}:silver
+HGETALL  medals:country:{gameID}:bronze`)
 	}
 	if len(rows) == 0 {
 		fmt.Println("  (este juego no tiene medallas todavía)")
@@ -883,20 +924,27 @@ HGETALL  medals:country:{gameID}:bronze`)
 }
 
 func (c *Console) multiDiscipline(ctx context.Context) {
-	c.explain("Neo4j", `MATCH (a:Athlete)-[:MEMBER_OF]->(t:Team)-[:WON]->(:Medal)
+	min, ok := c.askInt("Mín. disciplinas (ej: 2): ")
+	if !ok {
+		return
+	}
+	key := fmt.Sprintf("usecase:multi-discipline:%d", min)
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.AthleteDisciplines, error) {
+		return c.svc.AthletesInMultipleDisciplines(ctx, int(min))
+	})
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("Neo4j", `MATCH (a:Athlete)-[:MEMBER_OF]->(t:Team)-[:WON]->(:Medal)
 MATCH (t)-[:COMPETED_IN]->(:Event)-[:OF]->(d:Discipline)
 WITH a, count(DISTINCT d) AS disciplineCount, collect(DISTINCT d.name) AS disciplines
 WHERE disciplineCount >= $min
 RETURN a.id, a.name, disciplineCount, disciplines
 ORDER BY disciplineCount DESC`)
-	min, ok := c.askInt("Mín. disciplinas (ej: 2): ")
-	if !ok {
-		return
-	}
-	rows, err := c.svc.AthletesInMultipleDisciplines(ctx, int(min))
-	if err != nil {
-		c.fail(err)
-		return
 	}
 	for _, r := range rows {
 		fmt.Printf("  %-20s %d disciplinas: %s\n", r.AthleteName, r.DisciplineCount, strings.Join(r.Disciplines, ", "))
@@ -904,16 +952,23 @@ ORDER BY disciplineCount DESC`)
 }
 
 func (c *Console) recordHolders(ctx context.Context) {
-	c.explain("MongoDB", `db.event_results.aggregate([
+	key := "usecase:records"
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.RecordHolder, error) {
+		return c.svc.RecordHolders(ctx)
+	})
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("MongoDB", `db.event_results.aggregate([
   { $unwind: "$records" },
   { $project: { athleteId: "$records.athleteId", athleteName: "$records.athleteName",
                 disciplineId: 1, disciplineName: 1, sport: 1, eventId: 1, gameName: 1,
                 record_type: "$records.record_type", metric: "$records.metric", value: "$records.value" } }
 ])`)
-	rows, err := c.svc.RecordHolders(ctx)
-	if err != nil {
-		c.fail(err)
-		return
 	}
 	for _, r := range rows {
 		fmt.Printf("  %-20s %s %s=%.0f (%s) @ %s\n", r.AthleteName, r.DisciplineName, r.Metric, r.Value, r.Type, r.GameName)
@@ -921,14 +976,21 @@ func (c *Console) recordHolders(ctx context.Context) {
 }
 
 func (c *Console) hosts(ctx context.Context) {
-	c.explain("PostgreSQL", `SELECT g.id, g.year, g.city, c.id, c.name
-FROM olympic_games g
-JOIN countries c ON c.id = g.host_country_id
-ORDER BY g.year`)
-	rows, err := c.svc.Hosts(ctx)
+	key := "usecase:hosts"
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.HostInfo, error) {
+		return c.svc.Hosts(ctx)
+	})
 	if err != nil {
 		c.fail(err)
 		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("PostgreSQL", `SELECT g.id, g.year, g.city, c.id, c.name
+FROM olympic_games g
+JOIN countries c ON c.id = g.host_country_id
+ORDER BY g.year`)
 	}
 	for _, r := range rows {
 		fmt.Printf("  %d %s -> %s\n", r.Year, r.City, r.CountryName)
@@ -936,7 +998,23 @@ ORDER BY g.year`)
 }
 
 func (c *Console) popularEvents(ctx context.Context) {
-	c.explain("PostgreSQL", `SELECT e.id, e.name, COUNT(DISTINCT gc.country_id) AS countries
+	c.printGames(ctx)
+	gameID, ok := c.askInt("ID juego: ")
+	if !ok {
+		return
+	}
+	key := fmt.Sprintf("usecase:popular-events:%d", gameID)
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.EventPopularity, error) {
+		return c.svc.PopularEvents(ctx, gameID, 20)
+	})
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("PostgreSQL", `SELECT e.id, e.name, COUNT(DISTINCT gc.country_id) AS countries
 FROM events e
 JOIN teams t           ON t.event_id = e.id
 JOIN game_countries gc ON gc.id = t.game_country_id
@@ -944,15 +1022,6 @@ WHERE e.game_id = $1
 GROUP BY e.id, e.name
 ORDER BY countries DESC
 LIMIT $2`)
-	c.printGames(ctx)
-	gameID, ok := c.askInt("ID juego: ")
-	if !ok {
-		return
-	}
-	rows, err := c.svc.PopularEvents(ctx, gameID, 20)
-	if err != nil {
-		c.fail(err)
-		return
 	}
 	for _, r := range rows {
 		fmt.Printf("  %-28s %d países\n", r.EventName, r.CountriesCount)
@@ -960,7 +1029,23 @@ LIMIT $2`)
 }
 
 func (c *Console) medalsByCountryDiscipline(ctx context.Context) {
-	c.explain("Neo4j", `MATCH (c:Country {id:$countryId})<-[:REPRESENTS]-(t:Team)
+	c.printCountries(ctx)
+	countryID, ok := c.askInt("ID país: ")
+	if !ok {
+		return
+	}
+	key := fmt.Sprintf("usecase:medals-by-discipline:%d", countryID)
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.DisciplineMedalCount, error) {
+		return c.svc.MedalsByCountryAndDiscipline(ctx, countryID)
+	})
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("Neo4j", `MATCH (c:Country {id:$countryId})<-[:REPRESENTS]-(t:Team)
 MATCH (t)-[:WON]->(m:Medal)
 MATCH (t)-[:COMPETED_IN]->(:Event)-[:OF]->(d:Discipline)
 RETURN d.id, d.name,
@@ -969,15 +1054,6 @@ RETURN d.id, d.name,
        count(CASE WHEN m.name='bronze' THEN 1 END) AS bronze,
        count(m) AS total
 ORDER BY total DESC`)
-	c.printCountries(ctx)
-	countryID, ok := c.askInt("ID país: ")
-	if !ok {
-		return
-	}
-	rows, err := c.svc.MedalsByCountryAndDiscipline(ctx, countryID)
-	if err != nil {
-		c.fail(err)
-		return
 	}
 	for _, r := range rows {
 		fmt.Printf("  %-20s O:%d P:%d B:%d (total %d)\n", r.DisciplineName, r.Gold, r.Silver, r.Bronze, r.Total)
@@ -985,20 +1061,27 @@ ORDER BY total DESC`)
 }
 
 func (c *Console) topAthletes(ctx context.Context) {
-	c.explain("Redis + MongoDB", `Redis:   ZUNION numkeys medals:athlete:{g1} medals:athlete:{g2} ... AGGREGATE SUM WITHSCORES
+	min, ok := c.askInt("Mín. medallas (ej: 3): ")
+	if !ok {
+		return
+	}
+	key := fmt.Sprintf("usecase:top-athletes:%d", min)
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.TopAthlete, error) {
+		return c.svc.TopAthletes(ctx, int(min))
+	})
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("Redis + MongoDB", `Redis:   ZUNION numkeys medals:athlete:{g1} medals:athlete:{g2} ... AGGREGATE SUM WITHSCORES
          -- unifica los leaderboards per-juego en totales históricos
 MongoDB: db.event_results.aggregate([{ $unwind: "$records" },
            { $project: { athleteName: "$records.athleteName" } }])
          -- quién tiene récord (cualquier edición)
 (se combinan: aparece quien acumula >= N medallas O tiene récord)`)
-	min, ok := c.askInt("Mín. medallas (ej: 3): ")
-	if !ok {
-		return
-	}
-	rows, err := c.svc.TopAthletes(ctx, int(min))
-	if err != nil {
-		c.fail(err)
-		return
 	}
 	for _, r := range rows {
 		rec := ""

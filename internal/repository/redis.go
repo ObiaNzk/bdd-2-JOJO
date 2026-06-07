@@ -2,8 +2,11 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -122,4 +125,37 @@ func (r *RedisRepository) AddCountryToEvent(ctx context.Context, eventID, countr
 // GetEventPopularity returns the approximate distinct-country count for an event.
 func (r *RedisRepository) GetEventPopularity(ctx context.Context, eventID int64) (int64, error) {
 	return r.rdb.PFCount(ctx, eventCountriesKey(eventID)).Result()
+}
+
+// --- Use-case read-through cache ---
+//
+// Every use-case query is cached here as a JSON blob under a "usecase:" key with
+// a short TTL: the first call runs the real query and stores its result; calls
+// within the TTL are served straight from Redis without touching the underlying
+// store. Generic on the result type so any use case can reuse it.
+
+// CacheGetJSON loads a cached value into dest. It reports whether the key was
+// present (a miss is not an error). A decode/Redis failure degrades to a miss so
+// callers fall back to running the real query.
+func (r *RedisRepository) CacheGetJSON(ctx context.Context, key string, dest any) (bool, error) {
+	b, err := r.rdb.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal(b, dest); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CacheSetJSON stores val as JSON under key, expiring after ttl.
+func (r *RedisRepository) CacheSetJSON(ctx context.Context, key string, val any, ttl time.Duration) error {
+	b, err := json.Marshal(val)
+	if err != nil {
+		return err
+	}
+	return r.rdb.Set(ctx, key, b, ttl).Err()
 }

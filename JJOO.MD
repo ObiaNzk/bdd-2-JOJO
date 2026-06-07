@@ -17,5 +17,5 @@ Casos de Uso
 ¿Qué atletas han ganado medallas en múltiples disciplinas?
 ¿Cuál es el país anfitrión de cada edición de los Juegos Olímpicos?
 ¿Cuántas medallas ha ganado un país especifico en los Juegos Olímpicos anteriores Y en qué disciplinas?
-¿Qué atletas han ganado más de 3 medallas O han establecido un récord olímpico?
+¿Qué atletas han ganado más de 3 medallas O han establecido un récord olímpico? 
 
