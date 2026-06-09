@@ -1,4 +1,3 @@
-```mermaid
 erDiagram
   DEPORTE ||--o{ DISCIPLINA : "agrupa"
   DISCIPLINA ||--o{ EVENTO : "se compite en"
@@ -12,6 +11,7 @@ erDiagram
   EQUIPO ||--o{ EQUIPO_ATLETA : "compuesto por"
   ATLETA ||--o{ EQUIPO_ATLETA : "integra"
   EQUIPO ||--o{ MEDALLA : "obtiene"
+  EVENTO ||--o{ EVENTO : "ronda previa de"
   EVENTO ||--o{ RESULTADO_EVENTO : "registra"
   RESULTADO_EVENTO ||--o{ MARCA_RECORD : "embebe"
 
@@ -50,6 +50,8 @@ erDiagram
     bigint id_disciplina FK
     text nombre
     date fecha_evento
+    text fase
+    bigint id_evento_previo FK
     boolean realizado
   }
   EQUIPO {
@@ -86,4 +88,4 @@ erDiagram
     text metrica
     float valor
   }
-```
+
