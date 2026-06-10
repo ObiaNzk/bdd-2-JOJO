@@ -68,6 +68,8 @@ type GraphStore interface {
 	LinkTeamWonMedal(ctx context.Context, teamID, medalID int64, medalType model.MedalType) error
 	LinkAthleteRecord(ctx context.Context, athleteID, teamID, eventID, disciplineID int64, metric string, value float64) error
 	DeleteDisciplineRecord(ctx context.Context, disciplineID int64) error
+	ListRecordHolders(ctx context.Context) ([]model.RecordHolder, error)
+	ListRecordHoldersByDiscipline(ctx context.Context, disciplineID int64) ([]model.RecordHolder, error)
 	ListAthletesWithMedalsInMultipleDisciplines(ctx context.Context, minDisciplines int) ([]model.AthleteDisciplines, error)
 	CountMedalsByCountryAndDiscipline(ctx context.Context, countryID int64) ([]model.DisciplineMedalCount, error)
 	UpsertCountry(ctx context.Context, c *model.Country) error
@@ -280,24 +282,15 @@ func (s *Service) MedalRanking(ctx context.Context, gameID int64, limit int) ([]
 	return s.cache.GetMedalRanking(ctx, gameID, limit)
 }
 
-// RecordHolders resolves case 2 (athletes that hold olympic records) from the
-// world_records ledger: every entry in each discipline's timeline is a real
-// record (a mark that beat the standing one when set), newest first.
+// RecordHolders resolves case 2 (athletes that hold the standing olympic records)
+// from Neo4j, which only keeps the current holder's Record node per discipline.
 func (s *Service) RecordHolders(ctx context.Context) ([]model.RecordHolder, error) {
-	wrs, err := s.results.ListWorldRecords(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return flattenRecordHolders(wrs, 0), nil
+	return s.graph.ListRecordHolders(ctx)
 }
 
 // RecordHoldersByDiscipline resolves case 2 filtered by discipline.
 func (s *Service) RecordHoldersByDiscipline(ctx context.Context, disciplineID int64) ([]model.RecordHolder, error) {
-	wrs, err := s.results.ListWorldRecords(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return flattenRecordHolders(wrs, disciplineID), nil
+	return s.graph.ListRecordHoldersByDiscipline(ctx, disciplineID)
 }
 
 // WorldRecords returns the record ledger per discipline+metric: the full timeline
@@ -351,8 +344,8 @@ func (s *Service) MedalsByCountryAndDiscipline(ctx context.Context, countryID in
 // TopAthletes resolves case 7: athletes with at least minMedals OR a standing
 // olympic record, computed across every edition. The Redis leaderboards are
 // per-game, so the service unions them all (ZUNION SUM) before filtering, then
-// merges the result with the current record holders (the last entry of each
-// record timeline) — only whoever holds the record now, not superseded ones.
+// merges the result with the current record holders from Neo4j (which only keeps
+// the standing holder per discipline) — not superseded ones.
 func (s *Service) TopAthletes(ctx context.Context, minMedals int) ([]model.TopAthlete, error) {
 	games, err := s.sql.ListOlympicGames(ctx)
 	if err != nil {
@@ -374,21 +367,15 @@ func (s *Service) TopAthletes(ctx context.Context, minMedals int) ([]model.TopAt
 		}
 	}
 
-	worldRecords, err := s.results.ListWorldRecords(ctx)
+	recordHolders, err := s.graph.ListRecordHolders(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for _, wr := range worldRecords {
-		if len(wr.History) == 0 {
-			continue
-		}
-		// The standing record is the first holder in the timeline (newest-first);
-		// earlier (superseded) holders no longer "have" the record.
-		holder := wr.History[0].AthleteName
-		entry, ok := byName[holder]
+	for _, rh := range recordHolders {
+		entry, ok := byName[rh.AthleteName]
 		if !ok {
-			entry = &model.TopAthlete{AthleteName: holder, TotalMedals: totals[holder]}
-			byName[holder] = entry
+			entry = &model.TopAthlete{AthleteName: rh.AthleteName, TotalMedals: totals[rh.AthleteName]}
+			byName[rh.AthleteName] = entry
 		}
 		entry.HasRecord = true
 	}

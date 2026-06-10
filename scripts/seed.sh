@@ -46,7 +46,7 @@ curl -fsS "${APP_URL}/healthz" >/dev/null
 
 echo "==> Flushing derived stores (Redis / Mongo / Neo4j)"
 docker compose exec -T redis redis-cli FLUSHALL >/dev/null
-docker compose exec -T mongo mongosh app --quiet --eval "db.event_results.drop(); db.world_records.drop()" >/dev/null
+docker compose exec -T mongo mongosh app --quiet --eval "db.event_results.drop(); db.olympic_records.drop()" >/dev/null
 docker compose exec -T neo4j cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" \
   "MATCH (n) DETACH DELETE n" >/dev/null
 

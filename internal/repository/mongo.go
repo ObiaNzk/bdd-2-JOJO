@@ -14,13 +14,13 @@ import (
 
 type MongoRepository struct {
 	coll   *mongo.Collection // event_results: per-event type-specific outcomes
-	wrColl *mongo.Collection // world_records: standing-WR ledger per discipline+metric
+	wrColl *mongo.Collection // olympic_records: standing-record ledger per discipline+metric
 }
 
 func NewMongoRepository(db *mongo.Database) *MongoRepository {
 	return &MongoRepository{
 		coll:   db.Collection("event_results"),
-		wrColl: db.Collection("world_records"),
+		wrColl: db.Collection("olympic_records"),
 	}
 }
 

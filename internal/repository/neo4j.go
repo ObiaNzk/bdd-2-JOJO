@@ -200,6 +200,69 @@ func (r *Neo4jRepository) DeleteDisciplineRecord(ctx context.Context, discipline
 		map[string]any{"disciplineId": disciplineID})
 }
 
+// ListRecordHolders resolves case 2 over the graph: the standing olympic record
+// of every discipline. The graph only ever keeps the current holder's Record node
+// (superseded ones are deleted on a new record), so this is the live picture.
+func (r *Neo4jRepository) ListRecordHolders(ctx context.Context) ([]model.RecordHolder, error) {
+	return r.recordHolders(ctx, 0)
+}
+
+// ListRecordHoldersByDiscipline resolves case 2 filtered by discipline.
+func (r *Neo4jRepository) ListRecordHoldersByDiscipline(ctx context.Context, disciplineID int64) ([]model.RecordHolder, error) {
+	return r.recordHolders(ctx, disciplineID)
+}
+
+func (r *Neo4jRepository) recordHolders(ctx context.Context, disciplineID int64) ([]model.RecordHolder, error) {
+	where := ""
+	if disciplineID != 0 {
+		where = "WHERE d.id = $disciplineId"
+	}
+	cypher := fmt.Sprintf(
+		`MATCH (a:Athlete)-[:HOLDS]->(rec:Record)-[:IN_EVENT]->(e:Event)
+		 MATCH (e)-[:OF]->(d:Discipline)-[:PART_OF]->(sp:Sport)
+		 MATCH (e)-[:IN_GAME]->(g:OlympicGame)
+		 %s
+		 RETURN a.id AS athleteId, a.name AS athleteName,
+		        d.id AS disciplineId, d.name AS disciplineName, sp.name AS sport,
+		        e.id AS eventId, g.city + ' ' + toString(g.year) AS gameName,
+		        rec.type AS recordType, rec.metric AS metric, rec.value AS value
+		 ORDER BY d.name, a.name`, where)
+
+	res, err := neo4j.ExecuteQuery(ctx, r.driver, cypher,
+		map[string]any{"disciplineId": disciplineID},
+		neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]model.RecordHolder, 0, len(res.Records))
+	for _, rec := range res.Records {
+		athleteID, _, _ := neo4j.GetRecordValue[int64](rec, "athleteId")
+		athleteName, _, _ := neo4j.GetRecordValue[string](rec, "athleteName")
+		disciplineID, _, _ := neo4j.GetRecordValue[int64](rec, "disciplineId")
+		disciplineName, _, _ := neo4j.GetRecordValue[string](rec, "disciplineName")
+		sport, _, _ := neo4j.GetRecordValue[string](rec, "sport")
+		eventID, _, _ := neo4j.GetRecordValue[int64](rec, "eventId")
+		gameName, _, _ := neo4j.GetRecordValue[string](rec, "gameName")
+		recordType, _, _ := neo4j.GetRecordValue[string](rec, "recordType")
+		metric, _, _ := neo4j.GetRecordValue[string](rec, "metric")
+		value, _, _ := neo4j.GetRecordValue[float64](rec, "value")
+		out = append(out, model.RecordHolder{
+			AthleteID:      athleteID,
+			AthleteName:    athleteName,
+			DisciplineID:   disciplineID,
+			DisciplineName: disciplineName,
+			Sport:          sport,
+			EventID:        eventID,
+			GameName:       gameName,
+			Type:           recordType,
+			Metric:         metric,
+			Value:          value,
+		})
+	}
+	return out, nil
+}
+
 // CountMedalsByCountryAndDiscipline resolves case 6 over the graph: a country's
 // medals across every edition, broken down by discipline.
 func (r *Neo4jRepository) CountMedalsByCountryAndDiscipline(ctx context.Context, countryID int64) ([]model.DisciplineMedalCount, error) {

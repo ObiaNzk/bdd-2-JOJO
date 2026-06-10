@@ -33,45 +33,15 @@ func betterMark(direction string, candidate, standing float64) bool {
 	return candidate > standing
 }
 
-// flattenRecordHolders turns the world_records ledgers into the case-2 projection:
-// the standing olympic record of each discipline — the current holder only, which
-// is the first entry of the newest-first timeline. When disciplineID is non-zero
-// it keeps only that discipline.
-func flattenRecordHolders(wrs []model.WorldRecord, disciplineID int64) []model.RecordHolder {
-	out := make([]model.RecordHolder, 0)
-	for _, wr := range wrs {
-		if disciplineID != 0 && wr.DisciplineID != disciplineID {
-			continue
-		}
-		if len(wr.History) == 0 {
-			continue
-		}
-		h := wr.History[0] // standing record (newest-first)
-		out = append(out, model.RecordHolder{
-			AthleteID:      h.AthleteID,
-			AthleteName:    h.AthleteName,
-			DisciplineID:   wr.DisciplineID,
-			DisciplineName: wr.DisciplineName,
-			Sport:          wr.Sport,
-			EventID:        h.EventID,
-			GameName:       h.GameName,
-			Type:           "OR",
-			Metric:         wr.Metric,
-			Value:          h.Value,
-		})
-	}
-	return out
-}
-
 // evaluateEventRecord is the shared bridge the single-event builders (swimming,
 // vault) use after they have drawn a result: it turns the winning team's mark
 // into a world-record candidate, runs it through the ledger, then reflects the
 // outcome back into the event's record marks and the realize summary. It returns
 // the world record that stands afterwards and whether this edition broke it, so
 // the caller can store them on the EventResult document.
-func (s *Service) evaluateEventRecord(ctx context.Context, winner *model.TeamGraph, event *model.Event, metric string, winnerValue float64, records []model.RecordMark, summary *model.RealizeSummary) (model.WorldRecordHolder, bool, error) {
+func (s *Service) evaluateEventRecord(ctx context.Context, winner *model.TeamGraph, event *model.Event, metric string, winnerValue float64, records []model.RecordMark, summary *model.RealizeSummary) (bool, error) {
 	if len(winner.Athletes) == 0 {
-		return model.WorldRecordHolder{}, false, fmt.Errorf("winning team %d has no athletes", winner.TeamID)
+		return false, fmt.Errorf("winning team %d has no athletes", winner.TeamID)
 	}
 	a := winner.Athletes[0]
 	candidate := model.WorldRecordHolder{
@@ -91,7 +61,7 @@ func (s *Service) evaluateEventRecord(ctx context.Context, winner *model.TeamGra
 
 	standing, broken, err := s.EvaluateWorldRecord(ctx, candidate, winner.DisciplineID, winner.DisciplineName, winner.SportName)
 	if err != nil {
-		return model.WorldRecordHolder{}, false, err
+		return false, err
 	}
 
 	// Every record is an olympic record ("OR"); the records slice already carries
@@ -102,11 +72,11 @@ func (s *Service) evaluateEventRecord(ctx context.Context, winner *model.TeamGra
 		// Neo4j must hold only the current record holder per discipline: drop the
 		// superseded holder's node, then attach the new one(s).
 		if err := s.graph.DeleteDisciplineRecord(ctx, winner.DisciplineID); err != nil {
-			return model.WorldRecordHolder{}, false, fmt.Errorf("delete old discipline record: %w", err)
+			return false, fmt.Errorf("delete old discipline record: %w", err)
 		}
 		for _, rm := range records {
 			if err := s.graph.LinkAthleteRecord(ctx, rm.AthleteID, winner.TeamID, event.ID, winner.DisciplineID, rm.Metric, rm.Value); err != nil {
-				return model.WorldRecordHolder{}, false, fmt.Errorf("link athlete record: %w", err)
+				return false, fmt.Errorf("link athlete record: %w", err)
 			}
 		}
 	} else {
@@ -114,7 +84,7 @@ func (s *Service) evaluateEventRecord(ctx context.Context, winner *model.TeamGra
 		// untouched (this edition's winner does not become a record holder).
 		summary.WorldRecord = fmt.Sprintf("Record vigente de %s: %.2f %s (%s)", standing.AthleteName, standing.Value, standing.Metric, standing.GameName)
 	}
-	return standing, broken, nil
+	return broken, nil
 }
 
 // EvaluateWorldRecord compares a just-realized winning mark (candidate) against

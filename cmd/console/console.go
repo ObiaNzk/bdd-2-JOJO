@@ -103,12 +103,12 @@ func (c *Console) queries(ctx context.Context) {
 		fmt.Print(`
  Casos de uso (entre corchetes la base de datos de la que sale):
    1) Medallero por juego                        [Redis]
-   2) Récords olímpicos                          [MongoDB]
+   2) Récords olímpicos (vigentes)               [Neo4j]
    3) Eventos más populares (por países)         [PostgreSQL]
    4) Atletas con medallas en varias disciplinas [Neo4j]
    5) Sedes (país anfitrión por edición)         [PostgreSQL]
    6) Medallas de un país por disciplina         [Neo4j]
-   7) Top atletas (>= N medallas o record vigente) [Redis + MongoDB]
+   7) Top atletas (>= N medallas o record vigente) [Redis + Neo4j]
    8) Records olímpicos (histórico de vigencia)  [MongoDB]
    0) Volver
 `)
@@ -980,9 +980,12 @@ func (c *Console) recordHolders(ctx context.Context) {
 	if cached {
 		c.fromCache()
 	} else {
-		c.explain("MongoDB", `db.world_records.find({})
-// cada entrada de history[] es un record olímpico real (una marca que superó al
-// vigente al fijarse); se aplanan los holders de todas las disciplinas.`)
+		c.explain("Neo4j", `MATCH (a:Athlete)-[:HOLDS]->(rec:Record)-[:IN_EVENT]->(e:Event)
+MATCH (e)-[:OF]->(d:Discipline)-[:PART_OF]->(sp:Sport)
+MATCH (e)-[:IN_GAME]->(g:OlympicGame)
+RETURN a.name, d.name, sp.name, rec.type, rec.metric, rec.value, g.city+' '+toString(g.year)
+ORDER BY d.name
+// el grafo solo conserva el holder vigente por disciplina (el viejo se borra)`)
 	}
 	for _, r := range rows {
 		fmt.Printf("  %-20s %s %s=%.2f (%s) @ %s\n", r.AthleteName, r.DisciplineName, r.Metric, r.Value, r.Type, r.GameName)
@@ -1001,9 +1004,9 @@ func (c *Console) worldRecords(ctx context.Context) {
 	if cached {
 		c.fromCache()
 	} else {
-		c.explain("MongoDB", `db.world_records.find({})
+		c.explain("MongoDB", `db.olympic_records.find({})
 // history[]: timeline de holders del record olímpico (vigencia derivada de la
-// secuencia). El record vigente es la última entrada; vigente desde su setAt.`)
+// secuencia). El record vigente es la primera entrada; vigente desde su setAt.`)
 	}
 	for _, wr := range rows {
 		fmt.Printf("  %s (%s, %s):\n", wr.DisciplineName, wr.Sport, wr.Metric)
@@ -1122,10 +1125,10 @@ func (c *Console) topAthletes(ctx context.Context) {
 	if cached {
 		c.fromCache()
 	} else {
-		c.explain("Redis + MongoDB", `Redis:   ZUNION numkeys medals:athlete:{g1} medals:athlete:{g2} ... AGGREGATE SUM WITHSCORES
-         -- unifica los leaderboards per-juego en totales históricos
-MongoDB: db.world_records.find({})  -- holder vigente = primera entrada de history[]
-         -- quién TIENE el record olímpico ahora (no los superados)
+		c.explain("Redis + Neo4j", `Redis: ZUNION numkeys medals:athlete:{g1} medals:athlete:{g2} ... AGGREGATE SUM WITHSCORES
+       -- unifica los leaderboards per-juego en totales históricos
+Neo4j: MATCH (a:Athlete)-[:HOLDS]->(:Record) RETURN a.name
+       -- quién TIENE el record olímpico vigente (el grafo solo guarda ese)
 (se combinan: aparece quien acumula >= N medallas O tiene un record vigente)`)
 	}
 	for _, r := range rows {

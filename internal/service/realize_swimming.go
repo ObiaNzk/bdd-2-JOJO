@@ -76,7 +76,7 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 	}
 
 	first := graphs[0]
-	standing, broken, err := s.evaluateEventRecord(ctx, first, event, MetricTimeS, winnerTimeS, records, summary)
+	broken, err := s.evaluateEventRecord(ctx, first, event, MetricTimeS, winnerTimeS, records, summary)
 	if err != nil {
 		return nil, err
 	}
@@ -99,8 +99,7 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 			"poolLengthM": 50,
 			"ranking":     ranking,
 		},
-		Records:        records,
-		StandingRecord: &standing,
+		Records: records,
 	}); err != nil {
 		return nil, fmt.Errorf("register event result: %w", err)
 	}

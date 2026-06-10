@@ -33,12 +33,13 @@ func (h *Handler) Router() chi.Router {
 	// Use case 1: medals per country in the latest games (Redis).
 	r.Get("/games/latest/medals", h.medalRankingLatest)
 
-	// Use case 2: athletes that hold olympic records, derived from the
-	// event results in Mongo (optionally filtered by ?discipline=).
+	// Use case 2: athletes that hold the standing olympic records, from Neo4j
+	// (which keeps only the current holder per discipline; optionally filtered by
+	// ?discipline=).
 	r.Get("/records", h.records)
 
 	// World-record history: the standing world record per discipline+metric, with
-	// the full chronological timeline of holders (Mongo `world_records`).
+	// the full chronological timeline of holders (Mongo `olympic_records`).
 	r.Get("/world-records", h.worldRecords)
 
 	// Raw, type-specific event-result documents (Mongo).
@@ -58,7 +59,7 @@ func (h *Handler) Router() chi.Router {
 	// Use case 6: medals of a country per discipline, across every edition (Neo4j).
 	r.Get("/countries/{countryID}/medals-by-discipline", h.medalsByCountryAndDiscipline)
 
-	// Use case 7: athletes with >N medals OR a standing olympic record, across every edition (Redis + Mongo).
+	// Use case 7: athletes with >N medals OR a standing olympic record, across every edition (Redis + Neo4j).
 	r.Get("/top-athletes", h.topAthletes)
 
 	return r

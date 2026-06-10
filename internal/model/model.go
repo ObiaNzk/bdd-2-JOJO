@@ -96,11 +96,9 @@ type EventResult struct {
 	Sport          string         `json:"sport" bson:"sport"`
 	Date           time.Time      `json:"date" bson:"date"`
 	Result         map[string]any `json:"result" bson:"result"`
-	Records        []RecordMark   `json:"records,omitempty" bson:"records,omitempty"`
-	// StandingRecord carries the olympic record that stands after this event: the
-	// new holder when this edition beat it, or the still-standing past holder when
-	// it did not (so the document records "which is the record").
-	StandingRecord *WorldRecordHolder `json:"standingRecord,omitempty" bson:"standingRecord,omitempty"`
+	// Records is present only when this edition's winning mark set a new olympic
+	// record (it beat the standing one); its presence alone signals that.
+	Records []RecordMark `json:"records,omitempty" bson:"records,omitempty"`
 }
 
 // RecordMark flags, in a queryable top-level array, which embedded athlete set
@@ -116,7 +114,7 @@ type RecordMark struct {
 }
 
 // WorldRecord is the standing-olympic-record ledger for one discipline, kept
-// across editions in the Mongo `world_records` collection and keyed by
+// across editions in the Mongo `olympic_records` collection and keyed by
 // (DisciplineID, Metric). Its heart is History: the full timeline of every
 // athlete that ever held this record, newest first. The current record is simply
 // the first entry — it is not stored separately. Direction tells the comparison

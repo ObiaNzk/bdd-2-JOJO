@@ -85,7 +85,7 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 	}
 
 	first := graphs[0]
-	standing, broken, err := s.evaluateEventRecord(ctx, first, event, MetricHeightM, winnerBest, records, summary)
+	broken, err := s.evaluateEventRecord(ctx, first, event, MetricHeightM, winnerBest, records, summary)
 	if err != nil {
 		return nil, err
 	}
@@ -108,8 +108,7 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 			"barHeightsM": barHeights,
 			"ranking":     ranking,
 		},
-		Records:        records,
-		StandingRecord: &standing,
+		Records: records,
 	}); err != nil {
 		return nil, fmt.Errorf("register event result: %w", err)
 	}
