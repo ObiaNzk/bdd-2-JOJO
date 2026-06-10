@@ -108,7 +108,8 @@ func (c *Console) queries(ctx context.Context) {
    4) Atletas con medallas en varias disciplinas [Neo4j]
    5) Sedes (país anfitrión por edición)         [PostgreSQL]
    6) Medallas de un país por disciplina         [Neo4j]
-   7) Top atletas (>= N medallas o récord)       [Redis + MongoDB]
+   7) Top atletas (>= N medallas o record vigente) [Redis + MongoDB]
+   8) Records olímpicos (histórico de vigencia)  [MongoDB]
    0) Volver
 `)
 		switch c.readLine("Consulta> ") {
@@ -126,6 +127,8 @@ func (c *Console) queries(ctx context.Context) {
 			c.medalsByCountryDiscipline(ctx)
 		case "7":
 			c.topAthletes(ctx)
+		case "8":
+			c.worldRecords(ctx)
 		case "0", "":
 			return
 		default:
@@ -593,7 +596,18 @@ func (c *Console) realizeEvent(ctx context.Context) {
 		fmt.Println("  ! ese evento no está listo: o ya fue realizado, o depende de una ronda previa que todavía no realizaste")
 		return
 	}
-	summary, err := c.svc.RealizeEvent(ctx, eventID)
+	// Optional: fix the winning mark (100m time in s, or vault height in m) to
+	// script a record; empty leaves it random. Ignored for tournaments (fútbol).
+	var winnerMark *float64
+	if v := c.readLine("Marca ganadora (opcional, Enter=aleatoria): "); v != "" {
+		mark, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			fmt.Println("  ! marca inválida, ignorada (se usará aleatoria)")
+		} else {
+			winnerMark = &mark
+		}
+	}
+	summary, err := c.svc.RealizeEvent(ctx, eventID, winnerMark)
 	if err != nil {
 		c.fail(err)
 		return
@@ -603,6 +617,9 @@ func (c *Console) realizeEvent(ctx context.Context) {
 	fmt.Printf("       participantes: %d, records: %d\n", summary.Participants, summary.Records)
 	for _, m := range summary.Medals {
 		fmt.Printf("       medalla: %s\n", m)
+	}
+	if summary.WorldRecord != "" {
+		fmt.Printf("       record: %s\n", summary.WorldRecord)
 	}
 }
 
@@ -963,15 +980,44 @@ func (c *Console) recordHolders(ctx context.Context) {
 	if cached {
 		c.fromCache()
 	} else {
-		c.explain("MongoDB", `db.event_results.aggregate([
-  { $unwind: "$records" },
-  { $project: { athleteId: "$records.athleteId", athleteName: "$records.athleteName",
-                disciplineId: 1, disciplineName: 1, sport: 1, eventId: 1, gameName: 1,
-                record_type: "$records.record_type", metric: "$records.metric", value: "$records.value" } }
-])`)
+		c.explain("MongoDB", `db.world_records.find({})
+// cada entrada de history[] es un record olímpico real (una marca que superó al
+// vigente al fijarse); se aplanan los holders de todas las disciplinas.`)
 	}
 	for _, r := range rows {
-		fmt.Printf("  %-20s %s %s=%.0f (%s) @ %s\n", r.AthleteName, r.DisciplineName, r.Metric, r.Value, r.Type, r.GameName)
+		fmt.Printf("  %-20s %s %s=%.2f (%s) @ %s\n", r.AthleteName, r.DisciplineName, r.Metric, r.Value, r.Type, r.GameName)
+	}
+}
+
+func (c *Console) worldRecords(ctx context.Context) {
+	key := "usecase:world-records"
+	rows, cached, err := fetchCached(c, ctx, key, func() ([]model.WorldRecord, error) {
+		return c.svc.WorldRecords(ctx)
+	})
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if cached {
+		c.fromCache()
+	} else {
+		c.explain("MongoDB", `db.world_records.find({})
+// history[]: timeline de holders del record olímpico (vigencia derivada de la
+// secuencia). El record vigente es la última entrada; vigente desde su setAt.`)
+	}
+	for _, wr := range rows {
+		fmt.Printf("  %s (%s, %s):\n", wr.DisciplineName, wr.Sport, wr.Metric)
+		// History is newest-first: index 0 is the standing record; each older entry
+		// was valid until the SetAt of the entry just above it (the newer one).
+		for i, h := range wr.History {
+			until := "vigente"
+			if i > 0 {
+				until = wr.History[i-1].SetAt.Format("2006-01-02")
+			}
+			fmt.Printf("     %.2f %s  %-20s (%s, %s)  vigente [%s -> %s]\n",
+				h.Value, h.Metric, h.AthleteName, h.CountryName, h.GameName,
+				h.SetAt.Format("2006-01-02"), until)
+		}
 	}
 }
 
@@ -1078,15 +1124,14 @@ func (c *Console) topAthletes(ctx context.Context) {
 	} else {
 		c.explain("Redis + MongoDB", `Redis:   ZUNION numkeys medals:athlete:{g1} medals:athlete:{g2} ... AGGREGATE SUM WITHSCORES
          -- unifica los leaderboards per-juego en totales históricos
-MongoDB: db.event_results.aggregate([{ $unwind: "$records" },
-           { $project: { athleteName: "$records.athleteName" } }])
-         -- quién tiene récord (cualquier edición)
-(se combinan: aparece quien acumula >= N medallas O tiene récord)`)
+MongoDB: db.world_records.find({})  -- holder vigente = primera entrada de history[]
+         -- quién TIENE el record olímpico ahora (no los superados)
+(se combinan: aparece quien acumula >= N medallas O tiene un record vigente)`)
 	}
 	for _, r := range rows {
 		rec := ""
 		if r.HasRecord {
-			rec = " (récord)"
+			rec = " (record vigente)"
 		}
 		fmt.Printf("  %-20s %d medallas%s\n", r.AthleteName, r.TotalMedals, rec)
 	}

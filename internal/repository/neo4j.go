@@ -27,7 +27,7 @@ func (r *Neo4jRepository) write(ctx context.Context, cypher string, params map[s
 // graphLabels are every node label keyed by an `id` property. Each one gets a
 // uniqueness constraint so MERGE on {id} can never create a duplicate.
 var graphLabels = []string{
-	"Country", "OlympicGame", "Sport", "Discipline", "Athlete", "Event", "Team", "Medal",
+	"Country", "OlympicGame", "Sport", "Discipline", "Athlete", "Event", "Team", "Medal", "Record",
 }
 
 // EnsureConstraints declares a uniqueness constraint on the `id` of every node
@@ -161,6 +161,43 @@ func (r *Neo4jRepository) LinkTeamWonMedal(ctx context.Context, teamID, medalID 
 		 MERGE (m:Medal {id: $medalId}) SET m.name = $type
 		 MERGE (t)-[:WON]->(m)`,
 		map[string]any{"teamId": teamID, "medalId": medalID, "type": string(medalType)})
+}
+
+// LinkAthleteRecord records that an athlete holds the standing olympic record
+// ("OR") of a discipline, set in a given event and tied to the team that
+// generated it. The Athlete, Team and Event nodes are expected to already exist
+// (SyncTeamGraph runs first in the same fan-out). The Record node is keyed by
+// event+athlete so the same record converges instead of duplicating across the
+// seed's repeated runs, and carries disciplineId so it can be replaced when a
+// better mark supersedes it (see DeleteDisciplineRecord).
+func (r *Neo4jRepository) LinkAthleteRecord(ctx context.Context, athleteID, teamID, eventID, disciplineID int64, metric string, value float64) error {
+	return r.write(ctx,
+		`MATCH (a:Athlete {id: $athleteId})
+		 MATCH (t:Team {id: $teamId})
+		 MATCH (e:Event {id: $eventId})
+		 MERGE (rec:Record {id: $recordId})
+		   SET rec.type = 'OR', rec.disciplineId = $disciplineId, rec.metric = $metric, rec.value = $value
+		 MERGE (a)-[:HOLDS]->(rec)
+		 MERGE (rec)-[:IN_EVENT]->(e)
+		 MERGE (rec)-[:BY_TEAM]->(t)`,
+		map[string]any{
+			"athleteId":    athleteID,
+			"teamId":       teamID,
+			"eventId":      eventID,
+			"disciplineId": disciplineID,
+			"recordId":     fmt.Sprintf("%d:%d", eventID, athleteID),
+			"metric":       metric,
+			"value":        value,
+		})
+}
+
+// DeleteDisciplineRecord removes the current record node(s) of a discipline so
+// the graph only ever holds the standing holder: it is called right before
+// attaching a new holder, when a better mark supersedes the previous record.
+func (r *Neo4jRepository) DeleteDisciplineRecord(ctx context.Context, disciplineID int64) error {
+	return r.write(ctx,
+		`MATCH (rec:Record {disciplineId: $disciplineId}) DETACH DELETE rec`,
+		map[string]any{"disciplineId": disciplineID})
 }
 
 // CountMedalsByCountryAndDiscipline resolves case 6 over the graph: a country's

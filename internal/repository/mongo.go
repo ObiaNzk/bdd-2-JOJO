@@ -2,29 +2,42 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/ObiaNzk/bdd-2-JOJO/internal/model"
 )
 
 type MongoRepository struct {
-	coll *mongo.Collection
+	coll   *mongo.Collection // event_results: per-event type-specific outcomes
+	wrColl *mongo.Collection // world_records: standing-WR ledger per discipline+metric
 }
 
 func NewMongoRepository(db *mongo.Database) *MongoRepository {
-	return &MongoRepository{coll: db.Collection("event_results")}
+	return &MongoRepository{
+		coll:   db.Collection("event_results"),
+		wrColl: db.Collection("world_records"),
+	}
 }
 
 // EnsureIndexes creates the indexes backing the result and record queries.
 // Safe to call on every startup.
 func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
-	_, err := r.coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
+	if _, err := r.coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "disciplineId", Value: 1}}},
 		{Keys: bson.D{{Key: "eventId", Value: 1}}},
 		{Keys: bson.D{{Key: "records.athleteId", Value: 1}}},
+	}); err != nil {
+		return err
+	}
+	// One world-record document per (discipline, metric).
+	_, err := r.wrColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "disciplineId", Value: 1}, {Key: "metric", Value: 1}},
+		Options: options.Index().SetUnique(true),
 	})
 	return err
 }
@@ -51,53 +64,41 @@ func (r *MongoRepository) ListEventResultsByDiscipline(ctx context.Context, disc
 	return r.find(ctx, bson.M{"disciplineId": disciplineID})
 }
 
-// ListRecordHolders resolves case 2 (athletes that hold olympic records) by
-// flattening the embedded records of every event result.
-func (r *MongoRepository) ListRecordHolders(ctx context.Context) ([]model.RecordHolder, error) {
-	return r.recordHolders(ctx, nil)
-}
-
-// ListRecordHoldersByDiscipline resolves case 2 filtered by discipline.
-func (r *MongoRepository) ListRecordHoldersByDiscipline(ctx context.Context, disciplineID int64) ([]model.RecordHolder, error) {
-	return r.recordHolders(ctx, bson.D{{Key: "disciplineId", Value: disciplineID}})
-}
-
-// HasOlympicRecord reports whether an athlete holds any olympic record (case 7, part B).
-func (r *MongoRepository) HasOlympicRecord(ctx context.Context, athleteID int64) (bool, error) {
-	n, err := r.coll.CountDocuments(ctx, bson.M{"records.athleteId": athleteID})
-	if err != nil {
-		return false, err
+// GetWorldRecord returns the standing-world-record ledger for a discipline and
+// metric, or nil when none has been set yet (so the first event inaugurates it).
+func (r *MongoRepository) GetWorldRecord(ctx context.Context, disciplineID int64, metric string) (*model.WorldRecord, error) {
+	var wr model.WorldRecord
+	err := r.wrColl.FindOne(ctx, bson.M{"disciplineId": disciplineID, "metric": metric}).Decode(&wr)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
 	}
-	return n > 0, nil
-}
-
-func (r *MongoRepository) recordHolders(ctx context.Context, match bson.D) ([]model.RecordHolder, error) {
-	pipeline := mongo.Pipeline{}
-	if match != nil {
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
-	}
-	pipeline = append(pipeline,
-		bson.D{{Key: "$unwind", Value: "$records"}},
-		bson.D{{Key: "$project", Value: bson.D{
-			{Key: "_id", Value: 0},
-			{Key: "athleteId", Value: "$records.athleteId"},
-			{Key: "athleteName", Value: "$records.athleteName"},
-			{Key: "disciplineId", Value: "$disciplineId"},
-			{Key: "disciplineName", Value: "$disciplineName"},
-			{Key: "sport", Value: "$sport"},
-			{Key: "eventId", Value: "$eventId"},
-			{Key: "gameName", Value: "$gameName"},
-			{Key: "record_type", Value: "$records.record_type"},
-			{Key: "metric", Value: "$records.metric"},
-			{Key: "value", Value: "$records.value"},
-		}}},
-	)
-
-	cur, err := r.coll.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}
-	var out []model.RecordHolder
+	return &wr, nil
+}
+
+// UpsertWorldRecord persists the world-record ledger, replacing the document for
+// its (discipline, metric) key or inserting it the first time.
+func (r *MongoRepository) UpsertWorldRecord(ctx context.Context, wr *model.WorldRecord) error {
+	// Store _id as a hex string (like event_results) so reads decode into the
+	// string ID field; on insert Mongo would otherwise assign a raw ObjectID.
+	if wr.ID == "" {
+		wr.ID = bson.NewObjectID().Hex()
+	}
+	filter := bson.M{"disciplineId": wr.DisciplineID, "metric": wr.Metric}
+	_, err := r.wrColl.ReplaceOne(ctx, filter, wr, options.Replace().SetUpsert(true))
+	return err
+}
+
+// ListWorldRecords returns every world-record ledger (one per discipline+metric),
+// each with its full holder timeline.
+func (r *MongoRepository) ListWorldRecords(ctx context.Context) ([]model.WorldRecord, error) {
+	cur, err := r.wrColl.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	var out []model.WorldRecord
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}

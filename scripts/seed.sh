@@ -46,7 +46,7 @@ curl -fsS "${APP_URL}/healthz" >/dev/null
 
 echo "==> Flushing derived stores (Redis / Mongo / Neo4j)"
 docker compose exec -T redis redis-cli FLUSHALL >/dev/null
-docker compose exec -T mongo mongosh app --quiet --eval "db.event_results.drop()" >/dev/null
+docker compose exec -T mongo mongosh app --quiet --eval "db.event_results.drop(); db.world_records.drop()" >/dev/null
 docker compose exec -T neo4j cypher-shell -u neo4j -p "${NEO4J_PASSWORD}" \
   "MATCH (n) DETACH DELETE n" >/dev/null
 
@@ -256,13 +256,43 @@ api_post() {
 # puesto con equipos, así que la segunda pasada toma esos eventos recién creados
 # (los únicos que quedan sin realizar) y los realiza.
 echo "==> Realizing events via the API (POST /events/{id}/realize)"
+
+# scenarioMark scripts a deterministic world-record narrative across the three
+# editions (realized in chronological order): Tokio sets the WR, París does NOT
+# beat it, and Los Ángeles replaces Tokio's record. Returns the winning mark for
+# an individual final given its discipline and edition year, or empty for events
+# that should keep a random mark (e.g. fútbol). 100m Libre is lower-better;
+# Salto con garrocha is higher-better.
+scenarioMark() {
+  local discipline="$1" year="$2"
+  case "${discipline}|${year}" in
+    "100m Libre|2020") echo "46.90" ;;  # WR
+    "100m Libre|2024") echo "47.30" ;;  # no supera
+    "100m Libre|2028") echo "46.50" ;;  # rompe el de Tokio
+    "Salto con garrocha|2020") echo "6.00" ;;  # WR
+    "Salto con garrocha|2024") echo "5.90" ;;  # no supera
+    "Salto con garrocha|2028") echo "6.10" ;;  # rompe el de Tokio
+    *) echo "" ;;
+  esac
+}
+
 realize_pending() {
-  local ids
-  ids=$(docker compose exec -T postgres psql -U app -d app -tA -c \
-    "SELECT id FROM events WHERE NOT realized ORDER BY (previous_event_id IS NOT NULL), game_id, id;")
-  for ev in ${ids}; do
-    api_post "/events/${ev}/realize"
-  done
+  local rows
+  rows=$(docker compose exec -T postgres psql -U app -d app -tA -F'|' -c \
+    "SELECT e.id, d.name, g.year
+       FROM events e
+       JOIN disciplines d   ON d.id = e.discipline_id
+       JOIN olympic_games g ON g.id = e.game_id
+      WHERE NOT e.realized
+      ORDER BY (e.previous_event_id IS NOT NULL), e.game_id, e.id;")
+  local id discipline year mark path
+  while IFS='|' read -r id discipline year; do
+    [ -z "${id}" ] && continue
+    mark=$(scenarioMark "${discipline}" "${year}")
+    path="/events/${id}/realize"
+    [ -n "${mark}" ] && path="${path}?winnerMark=${mark}"
+    api_post "${path}"
+  done <<< "${rows}"
 }
 realize_pending   # finales individuales + semifinales de fútbol
 realize_pending   # finales y terceros puestos creados al realizar las semifinales

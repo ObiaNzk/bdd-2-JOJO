@@ -37,6 +37,10 @@ func (h *Handler) Router() chi.Router {
 	// event results in Mongo (optionally filtered by ?discipline=).
 	r.Get("/records", h.records)
 
+	// World-record history: the standing world record per discipline+metric, with
+	// the full chronological timeline of holders (Mongo `world_records`).
+	r.Get("/world-records", h.worldRecords)
+
 	// Raw, type-specific event-result documents (Mongo).
 	r.Get("/event-results", h.eventResults)
 
@@ -54,7 +58,7 @@ func (h *Handler) Router() chi.Router {
 	// Use case 6: medals of a country per discipline, across every edition (Neo4j).
 	r.Get("/countries/{countryID}/medals-by-discipline", h.medalsByCountryAndDiscipline)
 
-	// Use case 7: athletes with >N medals OR an olympic record, across every edition (Redis + Mongo).
+	// Use case 7: athletes with >N medals OR a standing olympic record, across every edition (Redis + Mongo).
 	r.Get("/top-athletes", h.topAthletes)
 
 	return r
@@ -97,7 +101,18 @@ func (h *Handler) realizeEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	summary, err := h.svc.RealizeEvent(r.Context(), eventID)
+	// Optional ?winnerMark= forces the winning mark (e.g. for a scripted record
+	// scenario); absent, the service draws it at random as usual.
+	var winnerMark *float64
+	if v := r.URL.Query().Get("winnerMark"); v != "" {
+		mark, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		winnerMark = &mark
+	}
+	summary, err := h.svc.RealizeEvent(r.Context(), eventID, winnerMark)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -124,6 +139,11 @@ func (h *Handler) records(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := h.svc.RecordHolders(r.Context())
+	respond(w, out, err)
+}
+
+func (h *Handler) worldRecords(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.WorldRecords(r.Context())
 	respond(w, out, err)
 }
 

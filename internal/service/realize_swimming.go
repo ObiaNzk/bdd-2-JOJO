@@ -15,15 +15,28 @@ import (
 // with lane, reaction time, the 50m split and the final time (all in seconds).
 // The winner carries the olympic record. graphs are already in random finishing
 // order.
-func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graphs []*model.TeamGraph, summary *model.RealizeSummary) (*model.RealizeSummary, error) {
+func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graphs []*model.TeamGraph, summary *model.RealizeSummary, winnerMark *float64) (*model.RealizeSummary, error) {
 	podium := []model.MedalType{model.Gold, model.Silver, model.Bronze}
 	lanes := swimLanes(len(graphs))
 	ranking := make([]map[string]any, 0, len(graphs))
 	var records []model.RecordMark
+	var winnerTimeS float64
 
 	for pos, tg := range graphs {
 		position := pos + 1
 		timeS := fakeSwimTimeS(position)
+		if winnerMark != nil {
+			// Anchor the field on the requested winning time: the winner gets it
+			// exactly, the rest finish slower by position (so it stays a valid race).
+			if position == 1 {
+				timeS = round2(*winnerMark)
+			} else {
+				timeS = round2(*winnerMark + float64(pos)*0.45 + rand.Float64()*0.15)
+			}
+		}
+		if position == 1 {
+			winnerTimeS = timeS
+		}
 		split50S := round2(timeS * (0.475 + rand.Float64()*0.01)) // first 50 is faster (dive)
 		reactionS := round2(0.60 + rand.Float64()*0.10)           // 0.60..0.70
 
@@ -55,7 +68,7 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 					AthleteID:   a.ID,
 					AthleteName: a.Name,
 					Type:        "OR",
-					Metric:      "time_s",
+					Metric:      MetricTimeS,
 					Value:       timeS,
 				})
 			}
@@ -63,6 +76,16 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 	}
 
 	first := graphs[0]
+	standing, broken, err := s.evaluateEventRecord(ctx, first, event, MetricTimeS, winnerTimeS, records, summary)
+	if err != nil {
+		return nil, err
+	}
+	// An olympic record only exists if it beat the standing one; otherwise this
+	// edition's winning mark is not a record and is dropped from the document.
+	if !broken {
+		records = nil
+	}
+
 	if err := s.RegisterEventResult(ctx, &model.EventResult{
 		EventID:        event.ID,
 		EventName:      first.EventName,
@@ -76,7 +99,8 @@ func (s *Service) realizeSwimming(ctx context.Context, event *model.Event, graph
 			"poolLengthM": 50,
 			"ranking":     ranking,
 		},
-		Records: records,
+		Records:        records,
+		StandingRecord: &standing,
 	}); err != nil {
 		return nil, fmt.Errorf("register event result: %w", err)
 	}

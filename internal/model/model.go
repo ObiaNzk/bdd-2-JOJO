@@ -97,6 +97,10 @@ type EventResult struct {
 	Date           time.Time      `json:"date" bson:"date"`
 	Result         map[string]any `json:"result" bson:"result"`
 	Records        []RecordMark   `json:"records,omitempty" bson:"records,omitempty"`
+	// StandingRecord carries the olympic record that stands after this event: the
+	// new holder when this edition beat it, or the still-standing past holder when
+	// it did not (so the document records "which is the record").
+	StandingRecord *WorldRecordHolder `json:"standingRecord,omitempty" bson:"standingRecord,omitempty"`
 }
 
 // RecordMark flags, in a queryable top-level array, which embedded athlete set
@@ -109,6 +113,41 @@ type RecordMark struct {
 	Type        string  `json:"record_type" bson:"record_type"`
 	Metric      string  `json:"metric" bson:"metric"`
 	Value       float64 `json:"value" bson:"value"`
+}
+
+// WorldRecord is the standing-olympic-record ledger for one discipline, kept
+// across editions in the Mongo `world_records` collection and keyed by
+// (DisciplineID, Metric). Its heart is History: the full timeline of every
+// athlete that ever held this record, newest first. The current record is simply
+// the first entry — it is not stored separately. Direction tells the comparison
+// which way is better ("lower" for a time, "higher" for a height).
+type WorldRecord struct {
+	ID             string              `json:"id" bson:"_id,omitempty"`
+	DisciplineID   int64               `json:"disciplineId" bson:"disciplineId"`
+	DisciplineName string              `json:"disciplineName" bson:"disciplineName"`
+	Sport          string              `json:"sport" bson:"sport"`
+	Metric         string              `json:"metric" bson:"metric"`
+	Direction      string              `json:"direction" bson:"direction"`
+	History        []WorldRecordHolder `json:"history" bson:"history"`
+}
+
+// WorldRecordHolder is one entry in a WorldRecord timeline: the full data of the
+// mark and who set it. SetAt is when it became the record (the start of its
+// validity); the end of its validity is the SetAt of the preceding holder in
+// History (the next-newer entry), so it is derived from the sequence rather than
+// stored. The first holder is still in effect.
+type WorldRecordHolder struct {
+	AthleteID   int64     `json:"athleteId" bson:"athleteId"`
+	AthleteName string    `json:"athleteName" bson:"athleteName"`
+	CountryID   int64     `json:"countryId" bson:"countryId"`
+	CountryName string    `json:"countryName" bson:"countryName"`
+	EventID     int64     `json:"eventId" bson:"eventId"`
+	GameID      int64     `json:"gameId" bson:"gameId"`
+	GameName    string    `json:"gameName" bson:"gameName"`
+	Metric      string    `json:"metric" bson:"metric"`
+	Value       float64   `json:"value" bson:"value"`
+	Date        time.Time `json:"date" bson:"date"`
+	SetAt       time.Time `json:"setAt" bson:"setAt"`
 }
 
 // --- Query result DTOs ---
@@ -223,4 +262,8 @@ type RealizeSummary struct {
 	Participants   int
 	Medals         []string
 	Records        int
+	// WorldRecord is a human-readable note about the world record after the event:
+	// whether it was broken (and by whom) or which past mark still stands. Empty
+	// for events that do not produce records (e.g. tournaments).
+	WorldRecord string
 }

@@ -19,12 +19,17 @@ const vaultBarStep = 0.05
 // ("O" cleared, "X" failed, "-" passed), all in metres. Ranking is by best
 // height (descending, no countback). The winner carries the olympic record.
 // graphs are already in random finishing order.
-func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs []*model.TeamGraph, summary *model.RealizeSummary) (*model.RealizeSummary, error) {
+func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs []*model.TeamGraph, summary *model.RealizeSummary, winnerMark *float64) (*model.RealizeSummary, error) {
 	podium := []model.MedalType{model.Gold, model.Silver, model.Bronze}
 	n := len(graphs)
 
-	// Best heights: distinct and decreasing by finishing position.
+	// Best heights: distinct and decreasing by finishing position. The whole field
+	// (and the record value) derives from the winner's best, so an explicit
+	// winnerMark just replaces the random draw.
 	winnerBest := snap05(5.95 + rand.Float64()*0.20) // 5.95..6.15
+	if winnerMark != nil {
+		winnerBest = snap05(*winnerMark)
+	}
 	bests := make([]float64, n)
 	for i := range bests {
 		bests[i] = round2(winnerBest - float64(i)*vaultBarStep)
@@ -72,7 +77,7 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 					AthleteID:   a.ID,
 					AthleteName: a.Name,
 					Type:        "OR",
-					Metric:      "height_m",
+					Metric:      MetricHeightM,
 					Value:       best,
 				})
 			}
@@ -80,6 +85,16 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 	}
 
 	first := graphs[0]
+	standing, broken, err := s.evaluateEventRecord(ctx, first, event, MetricHeightM, winnerBest, records, summary)
+	if err != nil {
+		return nil, err
+	}
+	// An olympic record only exists if it beat the standing one; otherwise this
+	// edition's winning mark is not a record and is dropped from the document.
+	if !broken {
+		records = nil
+	}
+
 	if err := s.RegisterEventResult(ctx, &model.EventResult{
 		EventID:        event.ID,
 		EventName:      first.EventName,
@@ -93,7 +108,8 @@ func (s *Service) realizeVault(ctx context.Context, event *model.Event, graphs [
 			"barHeightsM": barHeights,
 			"ranking":     ranking,
 		},
-		Records: records,
+		Records:        records,
+		StandingRecord: &standing,
 	}); err != nil {
 		return nil, fmt.Errorf("register event result: %w", err)
 	}

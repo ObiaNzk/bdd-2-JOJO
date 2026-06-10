@@ -20,7 +20,11 @@ import (
 // full podium. Tournament events are one round each: the team-count requirement
 // and the medals depend on the phase (see realizeTournament), so the validation
 // for those lives there.
-func (s *Service) RealizeEvent(ctx context.Context, eventID int64) (*model.RealizeSummary, error) {
+// winnerMark, when non-nil, forces the winning mark of a single-event final
+// (the 100m time or the vault height) instead of drawing it at random; the rest
+// of the field is scaled relative to it. It lets callers (e.g. the seed) script a
+// deterministic record narrative across editions. Tournaments ignore it.
+func (s *Service) RealizeEvent(ctx context.Context, eventID int64, winnerMark *float64) (*model.RealizeSummary, error) {
 	event, err := s.sql.GetEventByID(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -71,12 +75,12 @@ func (s *Service) RealizeEvent(ctx context.Context, eventID int64) (*model.Reali
 		if len(graphs) < 3 {
 			return nil, fmt.Errorf("event %d requires at least 3 teams, got %d", eventID, len(graphs))
 		}
-		out, err = s.realizeSwimming(ctx, event, graphs, summary)
+		out, err = s.realizeSwimming(ctx, event, graphs, summary, winnerMark)
 	case "field_attempts":
 		if len(graphs) < 3 {
 			return nil, fmt.Errorf("event %d requires at least 3 teams, got %d", eventID, len(graphs))
 		}
-		out, err = s.realizeVault(ctx, event, graphs, summary)
+		out, err = s.realizeVault(ctx, event, graphs, summary, winnerMark)
 	default:
 		return nil, fmt.Errorf("unknown result format %q for discipline %q", format, first.DisciplineName)
 	}

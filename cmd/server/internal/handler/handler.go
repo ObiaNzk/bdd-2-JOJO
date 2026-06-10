@@ -18,11 +18,12 @@ import (
 type Service interface {
 	AwardMedal(ctx context.Context, teamID int64, medalType model.MedalType) error
 	RegisterEventResult(ctx context.Context, res *model.EventResult) error
-	RealizeEvent(ctx context.Context, eventID int64) (*model.RealizeSummary, error)
+	RealizeEvent(ctx context.Context, eventID int64, winnerMark *float64) (*model.RealizeSummary, error)
 
 	MedalRankingLatest(ctx context.Context, limit int) ([]model.MedalCount, error)
 	RecordHolders(ctx context.Context) ([]model.RecordHolder, error)
 	RecordHoldersByDiscipline(ctx context.Context, disciplineID int64) ([]model.RecordHolder, error)
+	WorldRecords(ctx context.Context) ([]model.WorldRecord, error)
 	EventResults(ctx context.Context) ([]model.EventResult, error)
 	EventResultsByDiscipline(ctx context.Context, disciplineID int64) ([]model.EventResult, error)
 	PopularEvents(ctx context.Context, gameID int64, limit int) ([]model.EventPopularity, error)
